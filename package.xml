@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>capytown_granprix_pkg</name>
+  <version>0.1.0</version>
+  <description>CapyTown Gran Prix — laberinto con fusión LiDAR (wall-following, dead-ends, censo de karpinchus) + cámara (señal PARE) para Yahboom MicroROS-Pi5.</description>
+  <maintainer email="team@capytown.local">CapyTown G4</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>image_transport</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

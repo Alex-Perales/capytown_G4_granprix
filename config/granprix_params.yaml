@@ -1,0 +1,60 @@
+# Parámetros del CapyTown Gran Prix — "El Qhapaq Ñan de CapyTown".
+# Editar aquí lo que cambie de corrida a corrida (ronda, meta medida en la
+# pista, cuántos PARE reales hay, longitud óptima medida en el plano, etc.)
+# Los demás parámetros de bajo nivel (PD de seguimiento de pared, umbrales de
+# apertura/dead-end, etc.) vienen de maze_navigator.py (RC-4) y ya están
+# afinados para este robot — normalmente NO hace falta tocarlos.
+
+maze_solver:
+  ros__parameters:
+    scan_topic: "/scan"
+    odom_topic: "/odom_raw"
+    cmd_vel_topic: "/cmd_vel"
+    course_mode: "maze"          # laberinto real -> RECOVER 180 activo en dead-ends
+    side: "right"                # regla de la mano derecha (cambiar a "left" si conviene)
+    enable_obstacle_veer: true   # variante karpinchus (cajas en el pasillo) — opcional del docente
+
+    # --- fusión cámara (PARE) ---
+    pare_topic: "/pare_detectado"
+    pare_wait_t: 3.0             # s de detención completa ante un PARE (regla del reto)
+    pare_cooldown_t: 2.5
+
+    # --- META (esquina opuesta a INICIO) ---
+    # IMPORTANTE: medir en la pista real. Con /odom_raw reseteado en INICIO,
+    # META queda aprox. en (x=3.0 m a lo largo del laberinto, y=2.0 m de lado)
+    # para el plano de 360x240 cm del Word — AJUSTAR con la corrida real.
+    meta_enabled: false          # poner en true una vez medido meta_x/meta_y
+    meta_x: 3.0
+    meta_y: 2.0
+    meta_radius: 0.35
+
+    # --- métricas (metricas_granprix.csv) ---
+    ronda: 1                     # 1 = exploración, 2 = time attack
+    run_id: 1
+    metrics_csv: "/tmp/metricas_granprix.csv"
+    long_optima_cm: 0.0          # cm; medir la ruta más corta sobre el plano y completar
+    pare_reales: 0               # cuántos carteles PARE hay realmente puestos en esta corrida
+    colisiones_manual: -1        # -1 = completar después de ver el video/ros2 bag
+    pare_falsos_manual: -1       # -1 = completar después de ver el video/ros2 bag
+
+pare_detector:
+  ros__parameters:
+    image_topic: "/image_raw"
+    pare_topic: "/pare_detectado"
+    debug_topic: "/pare/debug_image"
+    cerca_interseccion_topic: "/cerca_interseccion"
+    use_attention_gate: true
+    min_area: 350
+    min_extent: 0.45
+    aspect_lo: 0.55
+    aspect_hi: 1.8
+    debounce_frames: 5
+    debounce_ratio: 0.6
+
+box_detector:
+  ros__parameters:
+    scan_topic: "/scan"
+    odom_topic: "/odom_raw"
+    run_id: 1
+    metrics_csv: "/tmp/metricas_granprix_karpinchus.csv"
+    detections_csv: "/tmp/capytown_granprix_karpinchu_detections.csv"
