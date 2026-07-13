@@ -15,8 +15,10 @@ Algoritmo (HSV + contornos, clásico y barato — corre bien en un Pi 5):
   2. Segmentar ROJO con DOS rangos HSV (el rojo envuelve el 0/179 del canal H
      en OpenCV) + limpieza morfológica (open/close) para quitar ruido.
   3. Buscar contornos y filtrar por ÁREA MÍNIMA, relación de aspecto (~cuadrado/
-     octogonal, no una franja delgada) y "extent" (área contorno / área caja
-     delimitadora) para descartar reflejos/franjas rojas que no son el cartel.
+     octogonal, no una franja delgada), "extent" (área contorno / área caja
+     delimitadora) y "solidity" (área contorno / área de su casco convexo) para
+     descartar reflejos/franjas rojas y siluetas no convexas (ropa, piel) que
+     no son el cartel — un rombo/hexágono real es casi convexo.
   4. DEBOUNCE temporal: exige que la mayoría de los últimos N frames tengan una
      detección válida antes de publicar True (evita falsos positivos de 1 frame
      por un destello/reflejo).
@@ -26,8 +28,9 @@ Algoritmo (HSV + contornos, clásico y barato — corre bien en un Pi 5):
      indica que se aproxima una intersección) esté en True. Esto reduce
      falsos positivos en tramos rectos largos donde no hay PARE posible.
 
-Publica también /pare/debug_image (sensor_msgs/Image) con el cuadro detectado
-dibujado encima — para verlo con `rqt_image_view` (o `ros2 run rqt_image_view
+Publica también /pare/debug_image (sensor_msgs/Image) con la FORMA ROJA real
+resaltada (tinte translúcido + contorno, no un rectángulo) y una etiqueta
+"PARE" encima — para verlo con `rqt_image_view` (o `ros2 run rqt_image_view
 rqt_image_view /pare/debug_image`).
 """
 from __future__ import annotations
@@ -67,20 +70,17 @@ HSV_RED_LO2 = (170, 90, 60)
 HSV_RED_HI2 = (179, 255, 255)
 
 
-def detect_red_sign(bgr_image, min_area=350, min_extent=0.45,
-                     aspect_lo=0.55, aspect_hi=1.8):
-    """Pure/testable (dado un array numpy BGR). Devuelve (found, bbox, area, mask).
-    bbox = (x, y, w, h) del mejor candidato, o None si no hay ninguno válido."""
-    hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
-    m1 = cv2.inRange(hsv, np.array(HSV_RED_LO1), np.array(HSV_RED_HI1))
-    m2 = cv2.inRange(hsv, np.array(HSV_RED_LO2), np.array(HSV_RED_HI2))
-    mask = cv2.bitwise_or(m1, m2)
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def _best_valid_contour(contours, min_area=350, min_extent=0.45,
+                         aspect_lo=0.55, aspect_hi=1.8, min_solidity=0.75):
+    """Filtra contornos de la máscara roja para quedarnos solo con formas
+    compactas tipo cartel (rombo/hexágono/octágono): área mínima, relación de
+    aspecto ~cuadrada, "extent" (área/caja) y "solidity" (área/casco convexo).
+    Un rombo/hexágono es casi convexo (solidity alta); una silueta de ropa/piel
+    (mangas, cuello, hombros) tiene entrantes que bajan mucho la solidity —
+    esto es lo que evita que una sudadera o la cara cuenten como PARE.
+    Devuelve (bbox, area, contour) del mejor candidato, o (None, 0.0, None)."""
     best = None
+    best_contour = None
     best_area = 0.0
     for c in contours:
         area = cv2.contourArea(c)
@@ -95,10 +95,51 @@ def detect_red_sign(bgr_image, min_area=350, min_extent=0.45,
             continue
         if extent < min_extent:
             continue
+        hull_area = cv2.contourArea(cv2.convexHull(c))
+        if hull_area <= 0 or (area / hull_area) < min_solidity:
+            continue
         if area > best_area:
             best_area = area
             best = (x, y, w, h)
-    return (best is not None), best, best_area, mask
+            best_contour = c
+    return best, best_area, best_contour
+
+
+def detect_red_sign(bgr_image, min_area=350, min_extent=0.45,
+                     aspect_lo=0.55, aspect_hi=1.8, min_solidity=0.75):
+    """Pure/testable (dado un array numpy BGR). Devuelve (found, bbox, area, mask, contour).
+    bbox = (x, y, w, h) del mejor candidato, contour = su contorno real (para resaltar
+    la forma exacta en vez de un rectángulo), o (None, None) si no hay ninguno válido."""
+    hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
+    m1 = cv2.inRange(hsv, np.array(HSV_RED_LO1), np.array(HSV_RED_HI1))
+    m2 = cv2.inRange(hsv, np.array(HSV_RED_LO2), np.array(HSV_RED_HI2))
+    mask = cv2.bitwise_or(m1, m2)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best, best_area, best_contour = _best_valid_contour(
+        contours, min_area, min_extent, aspect_lo, aspect_hi, min_solidity)
+    return (best is not None), best, best_area, mask, best_contour
+
+
+def draw_pare_highlight(frame, contour, label="PARE"):
+    """Resalta la FORMA ROJA real (no un rectángulo) con un tinte translúcido +
+    contorno, y pone `label` en una etiqueta arriba. Devuelve una copia del frame."""
+    if contour is None:
+        return frame.copy()
+    overlay = frame.copy()
+    cv2.drawContours(overlay, [contour], -1, (0, 0, 255), thickness=cv2.FILLED)
+    out = cv2.addWeighted(overlay, 0.45, frame, 0.55, 0)
+    cv2.drawContours(out, [contour], -1, (0, 0, 255), 2)
+
+    x, y, _, _ = cv2.boundingRect(contour)
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+    text_y = max(th + 10, y - 10)
+    cv2.rectangle(out, (x, text_y - th - 8), (x + tw + 10, text_y + 4), (0, 0, 255), -1)
+    cv2.putText(out, label, (x + 5, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    return out
 
 
 if _HAVE_ROS:
@@ -170,9 +211,9 @@ if _HAVE_ROS:
             # Zona de atención: si el gate está activo y NO estamos cerca de una
             # intersección, no evaluamos (evita falsos positivos en tramo recto).
             evaluate = self.cerca_interseccion or not self.use_attention_gate
-            found, bbox, area, mask = (False, None, 0.0, None)
+            found, _, area, _, contour = (False, None, 0.0, None, None)
             if evaluate:
-                found, bbox, area, mask = detect_red_sign(
+                found, _, area, _, contour = detect_red_sign(
                     frame, self.min_area, self.min_extent, self.aspect_lo, self.aspect_hi)
 
             self._recent.append(1 if found else 0)
@@ -183,21 +224,18 @@ if _HAVE_ROS:
             # header propagado (mismo timestamp/frame_id de la imagen de entrada) —
             # igual que lane_detector.py (out.header = header_msg.header), para que
             # RViz/rqt puedan sincronizar el debug_image con la imagen cruda.
-            self._publish_debug(frame, bbox, area, pare_now, evaluate, msg.header)
+            self._publish_debug(frame, contour, area, pare_now, evaluate, msg.header)
 
-        def _publish_debug(self, frame, bbox, area, pare_now, evaluate, header=None):
+        def _publish_debug(self, frame, contour, area, pare_now, evaluate, header=None):
             try:
-                dbg = frame.copy()
-                if bbox is not None:
-                    x, y, w, h = bbox
-                    color = (0, 0, 255) if pare_now else (0, 200, 255)
-                    cv2.rectangle(dbg, (x, y), (x + w, y + h), color, 3)
-                    cv2.putText(dbg, f"PARE area={area:.0f}", (x, max(0, y - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                label = "PARE DETECTADO" if pare_now else (
-                    "buscando (zona de atencion)" if evaluate else "sin atencion (lejos de interseccion)")
-                cv2.putText(dbg, label, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                            (0, 0, 255) if pare_now else (255, 255, 255), 2)
+                if contour is not None:
+                    label = "PARE" if pare_now else f"PARE? area={area:.0f}"
+                    dbg = draw_pare_highlight(frame, contour, label)
+                else:
+                    dbg = frame.copy()
+                    label = "buscando (zona de atencion)" if evaluate else "sin atencion (lejos de interseccion)"
+                    cv2.putText(dbg, label, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                                (255, 255, 255), 2)
                 out = self.bridge.cv2_to_imgmsg(dbg, encoding="bgr8")
                 if header is not None:
                     out.header = header
@@ -232,17 +270,29 @@ def _nothing(_):
     pass
 
 
-def _make_trackbars(window, vals):
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-    names = ("H min", "H max", "S min", "S max", "V min", "V max")
+CALIB_WINDOW = "Calibrador PARE (banda 1 + banda 2)"
+
+_B1_NAMES = ("B1 H min", "B1 H max", "B1 S min", "B1 S max", "B1 V min", "B1 V max")
+_B2_NAMES = ("B2 H min", "B2 H max", "B2 S min", "B2 S max", "B2 V min", "B2 V max")
+
+
+def _make_trackbars(seed1_lo, seed1_hi, seed2_lo, seed2_hi):
+    """Una sola ventana con los 12 sliders (banda 1 y banda 2 juntos), para no
+    tener que andar moviendo dos ventanas separadas."""
+    cv2.namedWindow(CALIB_WINDOW, cv2.WINDOW_NORMAL)
+    vals1 = (seed1_lo[0], seed1_hi[0], seed1_lo[1], seed1_hi[1], seed1_lo[2], seed1_hi[2])
+    vals2 = (seed2_lo[0], seed2_hi[0], seed2_lo[1], seed2_hi[1], seed2_lo[2], seed2_hi[2])
     maxs = (179, 179, 255, 255, 255, 255)
-    for n, v, mx in zip(names, vals, maxs):
-        cv2.createTrackbar(n, window, v, mx, _nothing)
+    for n, v, mx in zip(_B1_NAMES, vals1, maxs):
+        cv2.createTrackbar(n, CALIB_WINDOW, v, mx, _nothing)
+    for n, v, mx in zip(_B2_NAMES, vals2, maxs):
+        cv2.createTrackbar(n, CALIB_WINDOW, v, mx, _nothing)
 
 
-def _read_trackbars(window):
-    return tuple(cv2.getTrackbarPos(k, window)
-                 for k in ("H min", "H max", "S min", "S max", "V min", "V max"))
+def _read_trackbars():
+    red1 = tuple(cv2.getTrackbarPos(k, CALIB_WINDOW) for k in _B1_NAMES)
+    red2 = tuple(cv2.getTrackbarPos(k, CALIB_WINDOW) for k in _B2_NAMES)
+    return red1, red2
 
 
 def _yaml_block(red1, red2, min_area, min_extent, aspect_lo, aspect_hi):
@@ -284,8 +334,9 @@ def run_calibrator(source):
     if static_img is None and (cap is None or not cap.isOpened()):
         raise SystemExit(f"No se pudo abrir la fuente: {source}")
 
-    _make_trackbars("Rojo banda 1 (H bajo)", HSV_RED_LO1 + HSV_RED_HI1)
-    _make_trackbars("Rojo banda 2 (H alto)", HSV_RED_LO2 + HSV_RED_HI2)
+    # Valores iniciales de los sliders — calibrados por el equipo en cancha real.
+    _make_trackbars(seed1_lo=(37, 90, 94), seed1_hi=(34, 118, 255),
+                     seed2_lo=(66, 90, 60), seed2_hi=(179, 255, 255))
 
     last_print = 0.0
     red1 = red2 = None
@@ -301,22 +352,21 @@ def run_calibrator(source):
                 break
         frame = cv2.resize(frame, (640, 480))
 
-        red1 = _read_trackbars("Rojo banda 1 (H bajo)")
-        red2 = _read_trackbars("Rojo banda 2 (H alto)")
+        red1, red2 = _read_trackbars()
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         m1 = cv2.inRange(hsv, np.array((red1[0], red1[2], red1[4])),
                          np.array((red1[1], red1[3], red1[5])))
         m2 = cv2.inRange(hsv, np.array((red2[0], red2[2], red2[4])),
                          np.array((red2[1], red2[3], red2[5])))
         mask = cv2.bitwise_or(m1, m2)
+        kernel = np.ones((5, 5), np.uint8)
+        mask_clean = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        view = frame.copy()
-        found, bbox, area, _ = detect_red_sign(frame)
-        if bbox is not None:
-            x, y, w, h = bbox
-            cv2.rectangle(view, (x, y), (x + w, y + h), (0, 0, 255), 2)
-            cv2.putText(view, f"area={area:.0f}", (x, max(0, y - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _, _, best_contour = _best_valid_contour(contours)
+
+        view = draw_pare_highlight(frame, best_contour, "PARE")
         cv2.imshow("Camara (candidato en rojo)", view)
         cv2.imshow("Mascara rojo combinada", mask)
 

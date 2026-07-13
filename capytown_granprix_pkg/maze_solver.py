@@ -643,6 +643,13 @@ if _HAVE_ROS:
             self.pub_cerca = self.create_publisher(Bool, self.cerca_topic, 10)
             self.state_topic = self.declare_get("maze_state_topic", "/maze_state")
             self.pub_state = self.create_publisher(String, self.state_topic, 10)
+            # Pausa desde el dashboard web (web_dashboard.py) — seguridad manual:
+            # botón "Pausar" en el navegador -> el robot se detiene YA, sin tocar
+            # el estado de la FSM (se reanuda exactamente donde iba).
+            self.dashboard_pause_topic = self.declare_get("dashboard_pause_topic", "/dashboard_pause")
+            self.dashboard_paused = False
+            self.sub_dashboard_pause = self.create_subscription(
+                Bool, self.dashboard_pause_topic, self.on_dashboard_pause, 10)
             if _HAVE_VIZ:
                 self.markers_topic = self.declare_get("markers_topic", "/granprix_markers")
                 self.pub_markers = self.create_publisher(MarkerArray, self.markers_topic, 10)
@@ -726,6 +733,13 @@ if _HAVE_ROS:
             """Census de cajas (box_detector -> /cajas_avistadas), para reportarlo al parar."""
             try:
                 self.boxes_count = int(msg.data)
+            except Exception:
+                pass
+
+        def on_dashboard_pause(self, msg):
+            """Botón Pausar/Reanudar del dashboard web (web_dashboard.py)."""
+            try:
+                self.dashboard_paused = bool(msg.data)
             except Exception:
                 pass
 
@@ -937,6 +951,12 @@ if _HAVE_ROS:
             if self.scan is None:
                 return
             p = self.p
+            # PAUSA del dashboard web: manda sobre TODO lo demás (incluso META/FAULT/
+            # emergencia) — el robot se detiene ya, y retoma exacto donde iba al
+            # reanudar (no se toca self.state ni ningún contador).
+            if self.dashboard_paused:
+                self.publish(0.0, 0.0)
+                return
             # Gran Prix: publica el estado en vivo (para "Terminal de estado FSM")
             self.pub_state.publish(String(data=(
                 f"estado={self.state} pare={self.pare_phase} "

@@ -27,6 +27,9 @@ setup(
             "maze_solver = capytown_granprix_pkg.maze_solver:main",
             "pare_detector = capytown_granprix_pkg.pare_detector:main",
             "box_detector = capytown_granprix_pkg.box_detector:main",
+            "scan_map_viewer = capytown_granprix_pkg.scan_map_viewer:main",
+            "web_dashboard = capytown_granprix_pkg.web_dashboard:main",
+            "simple_camera = capytown_granprix_pkg.simple_camera:main",
         ],
     },
 )

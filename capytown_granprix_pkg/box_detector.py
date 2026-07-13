@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-box_detector.py — Censo de cajas para el reto "El Censo y el Guardián de las Cajas" (JARVIS).
-==============================================================================================
-Pieza confirmada por la arquitectura oficial: LiDAR→/scan→[box_detector]→/cajas_avistadas→[fsm].
-Detecta las CAJAS (20x20cm) montadas en las paredes del circuito y las CENSA (cuenta las 5: C1-C5)
-sin duplicar, usando /odom para deduplicar por posición en el mundo.
+box_detector.py — Censo de karpinchus (LiDAR) para el CapyTown Gran Prix.
+===========================================================================
+REUTILIZADO tal cual del reto RC-4 "El Censo y el Guardián de las Cajas" (JARVIS) —
+el Gran Prix pide explícitamente reutilizar este nodo (TPACK: "Reutilización de los
+nodos del RC: box_detector") para la VARIANTE OPCIONAL "karpinchus": 1-2 cajas
+(karpinchus dormidos) puestas en los pasillos del laberinto, que el robot debe
+detectar, detener frente a ellas y rodear sin perder el rumbo ni saltarse un PARE
+(maze_solver.py hace la detención/rodeo; este nodo hace el CENSO — cuenta y ubica
+las cajas vistas). No corre por defecto si `enable_karpinchus:=false` en el launch.
 
-Enchufa al paquete SIN tocar maze_navigator.py de NEXUS (nodo separado).
+Arquitectura: LiDAR→/scan→[box_detector]→/cajas_avistadas→[maze_solver.py].
+Detecta las CAJAS (20x20cm, geometría heredada del reto RC-4) y las CENSA sin
+duplicar, usando /odom para deduplicar por posición en el mundo.
+
+Enchufa al paquete SIN tocar maze_solver.py (nodo separado, arbitrado por /cajas_avistadas).
 
 Algoritmo (solo /scan + /odom, numpy, apto edge):
   1. Segmenta el /scan en tramos continuos (saltos de rango = bordes).

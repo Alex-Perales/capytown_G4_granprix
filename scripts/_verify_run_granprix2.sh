@@ -2,21 +2,26 @@
 # ============================================================================
 # run_granprix.sh — CapyTown Gran Prix: TODO con UN SOLO comando en RealVNC.
 # ============================================================================
-# AUTO-DETECTA el docker CONTENEDOR PRINCIPAL (no hace falta anotar IDs a mano
-# ni editarlos cada vez que cambian tras reiniciar la Pi — los IDs de Docker
-# son aleatorios en cada `docker run`). El bringup (chasis/IMU/LiDAR) sigue
-# corriendo DIRECTO en la Pi (sh ros2_humble.sh), igual que tu Terminal 1
-# original — no en docker.
+# Replica EXACTAMENTE tu procedimiento de 5 terminales ("Comandos YahboomCar")
+# en una sola ventana (tmux con paneles) + ventanas gráficas que se abren
+# solas. Usa los MISMOS 3 contenedores fijos que ya te funcionaban:
+#   CAM_CONTAINER   = cc35232ac52b  (cámara: camera.launch.py Y rqt_image_view)
+#   MAIN_CONTAINER  = b8734b1c0964  (código principal: antes lane_node.py,
+#                                    ahora maze_solver + pare_detector + box_detector)
+#   SERVO_CONTAINER = 994f4c1a8dfc  (posición de la cámara, servo_s1/s2, una vez)
+# El bringup (chasis/IMU/LiDAR) sigue corriendo DIRECTO en la Pi (sh
+# ros2_humble.sh), igual que tu Terminal 1 original — no en docker.
 #
-# Si cámara/código/servo viven en contenedores DISTINTOS (no el mismo
-# "principal"), fuerza cada uno así:
+# Si `docker ps -a` te muestra IDs distintos a los de arriba, cámbialos así:
 #   CAM_CONTAINER=xxxx MAIN_CONTAINER=yyyy SERVO_CONTAINER=zzzz bash run_granprix.sh
 #
 # Para DETENER todo:
 #   tmux kill-session -t granprix
 # ============================================================================
 
-IMAGE_FILTER="${IMAGE_FILTER:-yahboomtechnology/ros-humble}"
+CAM_CONTAINER="${CAM_CONTAINER:-cc35232ac52b}"
+MAIN_CONTAINER="${MAIN_CONTAINER:-b8734b1c0964}"
+SERVO_CONTAINER="${SERVO_CONTAINER:-994f4c1a8dfc}"
 SERVO_S1="${SERVO_S1:-20}"
 SERVO_S2="${SERVO_S2:--55}"
 
@@ -31,27 +36,26 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- auto-detecta el contenedor PRINCIPAL: primero por nombre de imagen; si no
-# hay match (tag distinto, etc.) cae al primer contenedor corriendo. Así el
-# script no se rompe cuando el ID cambia entre reinicios de la Pi.
-MAIN_AUTO="$(docker ps -q --filter "ancestor=${IMAGE_FILTER}" | head -n1)"
-if [ -z "$MAIN_AUTO" ]; then
-  MAIN_AUTO="$(docker ps -q | head -n1)"
-fi
-if [ -z "$MAIN_AUTO" ]; then
-  echo "!!! No encuentro ningún contenedor Docker corriendo (docker ps)."
-  echo "    Abre OTRA terminal en RealVNC, corre:  sh ~/ros2_humble.sh"
-  echo "    y déjala abierta. Luego vuelve a correr:  bash ~/run_granprix.sh"
-  exit 1
-fi
+# Asegura que los 3 contenedores existan y estén corriendo (si estaban
+# "Exited" desde un reinicio de la Pi, los reactiva; si ya corren, no hace nada).
+ensure_running() {
+  local id="$1"
+  if ! docker ps -a --format '{{.ID}}' | grep -q "^${id:0:12}"; then
+    echo "!!! No encuentro el contenedor $id (docker ps -a). Revisa el ID y ajusta la variable correspondiente."
+    return 1
+  fi
+  if ! docker ps --format '{{.ID}}' | grep -q "^${id:0:12}"; then
+    echo "==> Contenedor $id estaba detenido, arrancándolo..."
+    docker start "$id" >/dev/null
+    sleep 2
+  fi
+  return 0
+}
 
-CAM_CONTAINER="${CAM_CONTAINER:-$MAIN_AUTO}"
-MAIN_CONTAINER="${MAIN_CONTAINER:-$MAIN_AUTO}"
-SERVO_CONTAINER="${SERVO_CONTAINER:-$MAIN_AUTO}"
-
-echo "==> Contenedor principal detectado: $MAIN_AUTO"
-echo "    CAM=$CAM_CONTAINER  MAIN=$MAIN_CONTAINER  SERVO=$SERVO_CONTAINER"
-echo "    (para forzar otro por rol: CAM_CONTAINER=xxx MAIN_CONTAINER=yyy SERVO_CONTAINER=zzz bash run_granprix.sh)"
+echo "==> Verificando contenedores (CAM=$CAM_CONTAINER MAIN=$MAIN_CONTAINER SERVO=$SERVO_CONTAINER)..."
+ensure_running "$CAM_CONTAINER" || exit 1
+ensure_running "$MAIN_CONTAINER" || exit 1
+ensure_running "$SERVO_CONTAINER" || echo "    (servo opcional — si falla, sigue igual sin posicionar la cámara)"
 
 # Reinicia limpio si ya había una corrida anterior abierta.
 tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -83,7 +87,7 @@ sleep 1
 # ---------------------------------------------------------------------------
 tmux split-window -v -t "$SESSION:main.0"
 tmux send-keys -t "$SESSION:main.2" \
-  "echo '[GRAN PRIX] maze_solver + pare_detector + box_detector + dashboard web'; sleep 5; docker exec -it $MAIN_CONTAINER bash -lc '$WS_SETUP && cd ~/yahboomcar_ws && ros2 launch capytown_granprix_pkg granprix.launch.py show_dashboard:=true'" C-m
+  "echo '[GRAN PRIX] maze_solver + pare_detector + box_detector'; sleep 5; docker exec -it $MAIN_CONTAINER bash -lc '$WS_SETUP && cd ~/yahboomcar_ws && ros2 launch capytown_granprix_pkg granprix.launch.py'" C-m
 
 sleep 1
 
@@ -125,7 +129,6 @@ echo; echo 'Listo. Si alguna ventana no aparece, reintenta ese mismo comando doc
 echo 'SIN el -d (para verlo interactivo y leer el error).'" C-m
 
 tmux select-window -t "$SESSION:main"
-echo "==> Dashboard web (LiDAR + recorrido + cámara + pausa/valores): http://$(hostname -I | awk '{print $1}'):8080/"
 echo "==> Listo. Adjuntando a la sesión tmux (Ctrl+B luego D para salir sin detener nada)..."
 sleep 1
 tmux attach -t "$SESSION"

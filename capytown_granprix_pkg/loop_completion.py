@@ -16,6 +16,12 @@ Lógica (máquina de estados sobre la pose de /odom):
 Puro Python, sin ROS, importable y testeable. ADA/NEXUS lo enchufan al behavior_fsm:
 le pasan (x,y) de /odom cada tick; cuando devuelve True, el FSM frena el robot.
 Autor: FABLE · 2026-06-24 · verificado por efecto.
+
+RELACIÓN CON EL GRAN PRIX: NO forma parte de este reto — el Gran Prix es un
+LABERINTO con META fija (no un lazo/óvalo), así que maze_solver.py detecta el
+final por `meta_x/meta_y/meta_radius`, no por "volver a INICIO". Este módulo se
+deja importado (pero inerte: `self.loop = None`, nunca se instancia) por si el
+paquete se reutiliza para el reto de lazo/cajas en otra semana.
 """
 import math
 

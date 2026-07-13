@@ -17,6 +17,13 @@ Algoritmo:
 
 Solo numpy → corre en el Pi/edge. Parametrizado; afinar umbrales con el /scan real del robot.
 Autor: JARVIS · 2026-06-25.
+
+RELACIÓN CON EL GRAN PRIX: NO es parte de la rúbrica de este reto — el Gran Prix
+navega con el wall-follower reactivo de maze_solver.py (sectores LiDAR simples),
+no con líneas extraídas por Split & Merge. maze_solver.py lo importa de forma
+ADITIVA y con fallback silencioso solo para loguear líneas/cajas detectadas cada
+~2s (no cambia ninguna decisión de la FSM); se conserva por si se reutiliza el
+paquete para el reto de Split & Merge de otra semana.
 """
 from __future__ import annotations
 import numpy as np
