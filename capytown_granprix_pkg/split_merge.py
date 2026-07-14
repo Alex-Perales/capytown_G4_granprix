@@ -3,7 +3,7 @@
 """
 split_merge.py — Extracción de LÍNEAS de un scan LiDAR 2D por Split & Merge (pieza JARVIS).
 =============================================================================================
-Reto CapyTown (Henry): el enunciado pide Split & Merge para el LiDAR. Este módulo convierte
+Reto CapyTown: el enunciado pide Split & Merge para el LiDAR. Este módulo convierte
 un LaserScan en SEGMENTOS DE LÍNEA (las paredes del laberinto/circuito), que alimentan:
   • wall-following (seguir la línea de pared más cercana)
   • detección de cajas (una caja = segmento corto que SOBRESALE de la línea de pared)
@@ -28,7 +28,7 @@ paquete para el reto de Split & Merge de otra semana.
 from __future__ import annotations
 import numpy as np
 
-# umbrales por defecto (metros) — AFINAR con el sample real del MS200 de Henry
+# umbrales por defecto (metros) — AFINAR con el sample real del MS200 
 SPLIT_THRESH = 0.05      # 5 cm de desviación máx. antes de partir
 MERGE_THRESH = 0.05      # tolerancia para fusionar colineales
 MIN_POINTS   = 6         # mín. puntos para considerar una línea (filtra ruido)

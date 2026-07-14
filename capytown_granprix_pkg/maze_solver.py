@@ -8,7 +8,7 @@ y con una señal de cámara (/pare_detectado, std_msgs/Bool, publicada por
 pare_detector.py) para la semántica (detener por completo ante un cartel PARE).
 
 Este nodo es una ADAPTACIÓN de capytown_maze_pkg/maze_navigator.py (reto RC-4,
-"El Censo y el Guardián de las Cajas", robot 9/Henry) — se reutiliza tal cual el
+"El Censo y el Guardián de las Cajas" del Gran Prix), se reutiliza tal cual el
 controlador de seguimiento de pared/dead-end/rodeo de cajas (ya depurado y
 probado), y se añade ENCIMA la fusión con la cámara y las métricas del Gran Prix:
 
@@ -27,25 +27,32 @@ probado), y se añade ENCIMA la fusión con la cámara y las métricas del Gran 
   * RViz: publica /granprix_markers (visualization_msgs/MarkerArray) con un
     marcador por intersección tomada y por PARE respetado.
 
-States:
-  FOLLOW_WALL : keep the followed wall at TARGET_DIST using a PD controller on
-                lateral error; drive forward while front is clear.
-  TURN_IN     : front blocked AND followed-wall side blocked -> turn AWAY from
-                the wall (into open space) by 90°, measured via odom yaw.
-  TURN_OUT    : the followed wall disappeared (opening/corner) -> turn TOWARD
-                the wall by 90° and creep forward to re-acquire it.
-  RECOVER     : boxed in on 3 sides (dead-end) -> rotate 180°.
+Estados:
+  FOLLOW_WALL : mantiene la pared seguida a TARGET_DIST usando un controlador
+                PD sobre el error lateral; avanza mientras el frente esté
+                despejado.
+  TURN_IN     : frente bloqueado Y lado de la pared seguida también bloqueado
+                -> gira ALEJÁNDOSE de la pared (hacia el espacio abierto) 90°,
+                medido con el yaw de odometría.
+  TURN_OUT    : la pared seguida desapareció (apertura/esquina) -> gira HACIA
+                la pared 90° y avanza despacio para volver a engancharla.
+  RECOVER     : encerrado por 3 lados (dead-end) -> gira 180°.
   PARAR_PARE  : cámara detectó un cartel PARE -> detención completa ~3s.
 
-Design notes (lessons from CapyTown lane-controller):
-  * Sign discipline: positive lateral error (too far from wall) -> steer toward
-    wall; we keep the convention explicit and unit-test it.
-  * Hysteresis on "front blocked" / "wall lost" so we don't chatter at borders.
-  * All /scan ranges sanitized (drop nan/inf/<=0, clamp to range_max).
-  * Turns are odom-yaw closed-loop (turn-by-effect), not timed.
+Notas de diseño (lecciones del controlador de carril de CapyTown):
+  * Disciplina de signo: error lateral positivo (muy lejos de la pared) ->
+    dirige hacia la pared; mantenemos la convención explícita y con test
+    unitario.
+  * Histéresis en "frente bloqueado" / "pared perdida" para no oscilar en
+    los bordes.
+  * Todos los rangos de /scan se sanitizan (se descartan nan/inf/<=0, se
+    recortan al range_max).
+  * Los giros son en lazo cerrado por yaw de odometría (giro por efecto),
+    no por tiempo.
 
-Pure logic (sector extraction, state transition, control law) is importable and
-unit-tested WITHOUT ROS via the helpers at the bottom.
+La lógica pura (extracción de sectores, transición de estados, ley de
+control) es importable y está testeada con tests unitarios SIN ROS, a
+través de los helpers al final del archivo.
 """
 from __future__ import annotations
 import csv
@@ -54,7 +61,7 @@ import os
 
 import numpy as np
 
-# ---- ROS imports guarded so the logic can be unit-tested without ROS ----
+# ---- imports de ROS protegidos para poder testear la lógica sin ROS ----
 try:
     import rclpy
     from rclpy.node import Node
@@ -69,7 +76,7 @@ try:
     except Exception:
         _HAVE_VIZ = False
     _HAVE_ROS = True
-except Exception:  # pragma: no cover - allows import on a machine without ROS
+except Exception:  # pragma: no cover - permite importar en una máquina sin ROS
     _HAVE_ROS = False
     _HAVE_VIZ = False
     Node = object  # type: ignore
@@ -86,7 +93,7 @@ except Exception:
     except Exception:
         LoopCompletion = None  # type: ignore
 
-# Split & Merge — extracción de líneas LiDAR; pure module, guarded, aditivo.
+# Split & Merge — extracción de líneas LiDAR; módulo puro, protegido, aditivo.
 try:
     from capytown_granprix_pkg import split_merge as _sm
 except Exception:
@@ -97,9 +104,10 @@ except Exception:
 
 
 def _sensor_qos():
-    """BEST_EFFORT/volatile QoS — matches how LiDAR drivers & micro-ROS publish
-    /scan and /odom_raw. A RELIABLE subscriber against a BEST_EFFORT publisher gets
-    ZERO messages silently (the robot just never moves). This is the fix."""
+    """QoS BEST_EFFORT/volatile — coincide con cómo publican /scan y /odom_raw
+    los drivers de LiDAR y micro-ROS. Un subscriptor RELIABLE contra un publisher
+    BEST_EFFORT no recibe NINGÚN mensaje, en silencio (el robot simplemente
+    nunca se mueve). Este es el arreglo."""
     return QoSProfile(
         reliability=ReliabilityPolicy.BEST_EFFORT,
         history=HistoryPolicy.KEEP_LAST,
@@ -108,9 +116,9 @@ def _sensor_qos():
     )
 
 
-# ─────────────────────────── pure helpers ───────────────────────────
+# ─────────────────────────── helpers puros ───────────────────────────
 def sanitize(r, range_min, range_max):
-    """Map one raw LiDAR range to a usable float (range_max if invalid/empty)."""
+    """Convierte un rango crudo del LiDAR en un float utilizable (range_max si es inválido/vacío)."""
     if r is None:
         return range_max
     try:
@@ -129,10 +137,10 @@ def sanitize(r, range_min, range_max):
 def sector_min(ranges, angle_min, angle_inc, lo_deg, hi_deg,
                range_min, range_max):
     """
-    Minimum sanitized distance over [lo_deg, hi_deg] (degrees, robot frame,
-    0°=forward, +CCW). Robust to a 360° MS200 scan and to wrap-around.
-    Using the MINIMUM (closest obstacle) per sector is the safe choice for
-    collision-aware wall following.
+    Distancia mínima sanitizada en [lo_deg, hi_deg] (grados, marco del robot,
+    0°=frente, +CCW). Robusto a un scan de 360° del MS200 y al wrap-around.
+    Usar el MÍNIMO (obstáculo más cercano) por sector es la opción segura
+    para un seguimiento de pared consciente de colisiones.
     """
     if not ranges:
         return range_max
@@ -142,7 +150,7 @@ def sector_min(ranges, angle_min, angle_inc, lo_deg, hi_deg,
     n = len(ranges)
     for i in range(n):
         a = angle_min + i * angle_inc
-        # normalize angle to [-pi, pi] for comparison
+        # normaliza el ángulo a [-pi, pi] para comparar
         aa = math.atan2(math.sin(a), math.cos(a))
         if lo <= aa <= hi:
             d = sanitize(ranges[i], range_min, range_max)
@@ -154,10 +162,11 @@ def sector_min(ranges, angle_min, angle_inc, lo_deg, hi_deg,
 def sector_robust(ranges, angle_min, angle_inc, lo_deg, hi_deg,
                   range_min, range_max, drop=1, offset_deg=0.0):
     """
-    Like sector_min but robust to a single spurious close ray: collect all
-    sanitized ranges in the sector, drop the `drop` closest, return the min of
-    the rest. A lone phantom return at 0.06 m no longer forces a false
-    obstacle/stop (FABLE/ALICE pt2). Falls back to sector_min if too few rays.
+    Como sector_min pero robusto a un único rayo cercano espurio: junta todos
+    los rangos sanitizados del sector, descarta los `drop` más cercanos, y
+    devuelve el mínimo del resto. Un retorno fantasma aislado a 0.06 m ya no
+    fuerza un obstáculo/parada falsos (FABLE/ALICE pt2). Si hay muy pocos
+    rayos, cae de vuelta a sector_min.
     """
     if not ranges:
         return range_max
@@ -173,7 +182,7 @@ def sector_robust(ranges, angle_min, angle_inc, lo_deg, hi_deg,
         return range_max
     vals.sort()
     if len(vals) > drop + 1:
-        return vals[drop]        # k-th smallest after dropping `drop` closest
+        return vals[drop]        # el k-ésimo más chico tras descartar los `drop` más cercanos
     return vals[0]
 
 
@@ -258,14 +267,14 @@ def fit_wall_line(ranges, angle_min, angle_inc, lo_deg, hi_deg,
 
 
 def yaw_from_quat(x, y, z, w):
-    """Z-axis yaw from a quaternion."""
+    """Yaw (eje Z) a partir de un cuaternión."""
     siny = 2.0 * (w * z + x * y)
     cosy = 1.0 - 2.0 * (y * y + z * z)
     return math.atan2(siny, cosy)
 
 
 def ang_diff(target, current):
-    """Shortest signed angular difference target-current in [-pi, pi]."""
+    """Diferencia angular con signo más corta entre target-current, en [-pi, pi]."""
     d = target - current
     return math.atan2(math.sin(d), math.cos(d))
 
@@ -275,7 +284,7 @@ def clamp(x, lo, hi):
 
 
 def coerce_param(value, default):
-    """Coerce ROS launch string overrides back to the DEFAULTS type."""
+    """Convierte los overrides de string del launch de ROS de vuelta al tipo de DEFAULTS."""
     if isinstance(default, bool):
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
@@ -294,7 +303,7 @@ def coerce_param(value, default):
 
 
 class Sectors:
-    """Container for the three decision distances."""
+    """Contenedor para las tres distancias de decisión."""
     __slots__ = ("front", "left", "right")
 
     def __init__(self, front, left, right):
@@ -304,24 +313,26 @@ class Sectors:
 
 
 def is_loop_boxes_mode(p) -> bool:
-    """True for the current CapyTown boxes-loop challenge.
+    """True para el reto actual de CapyTown de lazo con cajas (boxes-loop).
 
-    That course is an oval/lazo around a central island with loose boxes in the
-    corridor. It is not a maze with dead ends, so a front obstacle must not be
-    interpreted as "boxed in -> 180° RECOVER".
+    Ese circuito es un óvalo/lazo alrededor de una isla central con cajas
+    sueltas en el pasillo. No es un laberinto con dead-ends, así que un
+    obstáculo al frente no debe interpretarse como "encerrado -> 180° RECOVER".
     """
     return str(p.get("course_mode", "maze")).lower() in ("loop_boxes", "boxes_loop", "cajas")
 
 
 def decide_state(prev_state, s: Sectors, p, front_blocked=None) -> str:
     """
-    Pure state-transition function (testable). `p` exposes front_block,
-    front_clear, wall_block, wall_lost, side ('right'/'left').
-    `front_blocked`: if provided (the node computes it WITH hysteresis —
-    enter at front_block, leave at front_clear), it is used directly; if None,
-    falls back to a plain front<=front_block test (keeps unit tests stable).
-    Priority: boxed->RECOVER, wall opening->TURN_OUT (take the corner, right-hand
-    rule), front blocked->TURN_IN, else FOLLOW_WALL.
+    Función pura de transición de estados (testeable). `p` expone
+    front_block, front_clear, wall_block, wall_lost, side ('right'/'left').
+    `front_blocked`: si se provee (el nodo lo calcula CON histéresis — entra
+    en front_block, sale en front_clear), se usa directamente; si es None,
+    cae de vuelta a un test simple front<=front_block (mantiene estables los
+    tests unitarios).
+    Prioridad: encerrado->RECOVER, apertura de pared->TURN_OUT (toma la
+    esquina, regla de la mano derecha), frente bloqueado->TURN_IN, si no
+    FOLLOW_WALL.
     """
     side = p["side"]
     wall = s.right if side == "right" else s.left
@@ -333,10 +344,10 @@ def decide_state(prev_state, s: Sectors, p, front_blocked=None) -> str:
         if is_loop_boxes_mode(p):
             return "TURN_IN"
         return "RECOVER"
-    # opening on the followed side -> go grab the corner (TURN_OUT)
+    # apertura en el lado seguido -> ir a tomar la esquina (TURN_OUT)
     if wall >= p["wall_lost"]:
         return "TURN_OUT"
-    # front blocked -> turn away from wall
+    # frente bloqueado -> girar alejándose de la pared
     if fb:
         return "TURN_IN"
     return "FOLLOW_WALL"
@@ -344,35 +355,39 @@ def decide_state(prev_state, s: Sectors, p, front_blocked=None) -> str:
 
 def follow_cmd(s: Sectors, p, prev_err=0.0, dt=0.0):
     """
-    PD wall-follow control law -> (linear, angular). Pure/testable.
-    error = wall_target - wall_dist ; positive error = too close -> steer away;
-    negative = too far -> steer toward wall. Sign convention unit-tested.
+    Ley de control PD de seguimiento de pared -> (linear, angular).
+    Pura/testeable. error = wall_target - wall_dist; error positivo = muy
+    cerca -> dirige alejándose; negativo = muy lejos -> dirige hacia la
+    pared. Convención de signo con test unitario.
 
-    Damping (kd) + deadband added to kill the surf/weave a P-only law produces
-    (it hunts around the setpoint). The derivative is fed via prev_err+dt, which
-    the node tracks across ticks. Defaults prev_err=0.0, dt=0.0 keep this PURE
-    and testable: with dt=0 the D term is exactly 0 -> unit tests unchanged.
+    Se agregó amortiguación (kd) + deadband para eliminar el surf/vaivén
+    que produce una ley solo-P (oscila alrededor del setpoint). La
+    derivada se alimenta vía prev_err+dt, que el nodo trackea entre ticks.
+    Los valores por defecto prev_err=0.0, dt=0.0 mantienen esto PURO y
+    testeable: con dt=0 el término D es exactamente 0 -> tests unitarios
+    sin cambios.
     """
     side = p["side"]
     wall = s.right if side == "right" else s.left
     err = p["wall_target"] - wall              # +: too close, -: too far
-    # deadband: ignore micro-error near target so we drive STRAIGHT instead of
-    # hunting around the setpoint (a prime cause of the weave/"surf").
+    # deadband: ignora el micro-error cerca del target para ir DERECHO en vez
+    # de oscilar alrededor del setpoint (causa principal del vaivén/"surf").
     db = p.get("deadband", 0.0)
     err_p = 0.0 if abs(err) < db else err
-    # derivative term damps the oscillation; derr from the node-tracked prev_err.
+    # el término derivativo amortigua la oscilación; derr viene del prev_err trackeado por el nodo.
     derr = ((err - prev_err) / dt) if dt > 1e-6 else 0.0
-    # steer sign: for RIGHT-wall following, positive angular = turn left (away
-    # from right wall) when too close (err>0). For LEFT-wall, mirror it.
+    # signo de dirección: siguiendo pared DERECHA, angular positivo = girar
+    # izquierda (alejándose de la pared derecha) cuando está muy cerca
+    # (err>0). Para pared IZQUIERDA, se espeja.
     sign = 1.0 if side == "right" else -1.0
     angular = sign * (p["kp"] * err_p + p.get("kd", 0.0) * derr)
-    # slow down when front is tight
+    # frena cuando el frente está apretado
     lin = p["v_max"]
     if s.front < p["front_slow"]:
         frac = max(0.0, (s.front - p["front_block"]) /
                    max(1e-3, (p["front_slow"] - p["front_block"])))
         lin = p["v_min"] + (p["v_max"] - p["v_min"]) * frac
-    # clamp angular
+    # recorta el angular
     amax = p["w_max"]
     angular = clamp(angular, -amax, amax)
     return lin, angular
@@ -380,10 +395,11 @@ def follow_cmd(s: Sectors, p, prev_err=0.0, dt=0.0):
 
 def should_hold_straight(s: Sectors, p, front_blocked=False) -> bool:
     """
-    When there is no useful side wall and the front is clear, do not force a
-    right-hand TURN_OUT. Hold the current odom heading and drive straight until
-    a wall is reacquired. This prevents the "spin in open/ambiguous space"
-    failure while keeping normal wall-following whenever a wall exists.
+    Cuando no hay pared lateral útil y el frente está despejado, no forzar
+    un TURN_OUT de mano derecha. Mantener el rumbo actual de odometría y
+    avanzar derecho hasta reacoplar una pared. Esto evita la falla de
+    "girar sin parar en espacio abierto/ambiguo", conservando el
+    seguimiento de pared normal siempre que exista una pared.
     """
     no_wall_visible = (
         p.get("straight_when_no_wall", True)
@@ -406,12 +422,14 @@ def should_hold_straight(s: Sectors, p, front_blocked=False) -> bool:
 
 
 def localized_front_obstacle(front, left_shoulder, right_shoulder, p) -> bool:
-    """Return True when the frontal hit looks like a box, not a wall/corner.
+    """Devuelve True cuando el golpe frontal parece una caja, no una pared/esquina.
 
-    A wall across the corridor tends to occupy the center and both front
-    shoulders at similar distance. A loose box is more localized: the center is
-    closer, while the shoulders still see open space/wall behind it. This gate
-    prevents the veer controller from stealing normal wall-follow corner logic.
+    Una pared que cruza el pasillo tiende a ocupar el centro y ambos
+    hombros frontales a distancia similar. Una caja suelta es más
+    localizada: el centro está más cerca, mientras los hombros aún ven
+    espacio abierto/pared detrás de ella. Este filtro evita que el
+    controlador de esquive (veer) le robe protagonismo a la lógica normal
+    de esquina del seguimiento de pared.
     """
     detect = p.get("obstacle_detect", p["front_slow"])
     if front >= detect:
@@ -425,11 +443,12 @@ def localized_front_obstacle(front, left_shoulder, right_shoulder, p) -> bool:
 
 
 def wall_parallel_error(front_side, back_side, side, p):
-    """Signed alignment error from two LiDAR hits on the followed wall.
+    """Error de alineación con signo, a partir de dos golpes de LiDAR en la pared seguida.
 
-    For the right wall, front<back means the nose is pointing into the wall and
-    the correction must turn left (+angular). For the left wall the sign mirrors.
-    Returns None when the side wall is not close enough to be trusted.
+    Para la pared derecha, front<back significa que el morro apunta hacia la
+    pared y la corrección debe girar a la izquierda (+angular). Para la
+    pared izquierda el signo se espeja. Devuelve None cuando la pared
+    lateral no está lo bastante cerca como para confiar en ella.
     """
     max_range = p.get("wall_align_max_range", p.get("wall_lost", 0.55))
     if front_side >= max_range or back_side >= max_range:
@@ -444,11 +463,12 @@ def wall_is_parallel(front_side, back_side, side, p) -> bool:
 
 
 def corner_pose_aligned(front, rear, followed_wall, p) -> bool:
-    """True when a turn reached a corridor-corner pose.
+    """True cuando un giro alcanzó una pose de esquina de pasillo.
 
-    For Henry's right-wall course, a good post-corner pose often sees open front,
-    a wall behind (the segment just left), and the followed wall on the right.
-    That geometry is a better turn stop than blindly completing a nominal 90°.
+    Para el circuito de pared derecha, una buena pose post-esquina
+    suele ver el frente abierto, una pared detrás (el tramo recién dejado),
+    y la pared seguida a la derecha. Esa geometría es un mejor punto de
+    corte del giro que completar ciegamente un nominal de 90°.
     """
     if front < p.get("front_clear", 0.38):
         return False
@@ -460,110 +480,109 @@ def corner_pose_aligned(front, rear, followed_wall, p) -> bool:
 
 
 def heading_hold_cmd(current_yaw, target_yaw, p):
-    """Drive forward while damping heading drift against an odom yaw reference."""
+    """Avanza mientras amortigua la deriva de rumbo contra una referencia de yaw de odometría."""
     err = ang_diff(target_yaw, current_yaw)
     limit = p.get("heading_w_max", min(0.45, p["w_max"]))
     ang = clamp(p.get("heading_kp", 1.2) * err, -limit, limit)
     return p["v_max"], ang
 
 
-# ─────────────────────────── ROS node ───────────────────────────
+# ─────────────────────────── nodo ROS ───────────────────────────
 DEFAULTS = dict(
     course_mode="maze",      # Gran Prix = laberinto real con dead-ends -> RECOVER 180 activo
-    side="right",            # right-hand rule by default
-    wall_target=0.20,        # LiDAR->wall distance confirmed for robot 9
-    wall_block=0.14,         # side considered too close below this (m)
-    wall_lost=0.55,          # side considered "opening" in ~60cm corridor
-    wall_align_enabled=True, # use front/back side rays to keep robot parallel to right wall
-    wall_align_tol=0.04,     # m: front-side vs back-side delta considered aligned
-    wall_align_kp=1.2,       # angular correction per meter of side-wall skew
-    wall_align_w_max=0.18,   # max angular correction from side-wall alignment
-    wall_align_max_range=0.50,# only trust alignment while a side wall is actually visible
-    corner_align_enabled=True,# stop 90° turns by geometry: front open + rear wall + side wall
-    corner_rear_max=0.45,    # m: wall behind must be visible after a correct corner
-    corner_side_max=0.38,    # m: followed wall must be visible on the side
-    corner_min_turn_t=0.45,  # s: ignore corner detector at the very start of a turn
-    front_block=0.30,        # front considered blocked below this (m)
-    front_slow=0.50,         # start slowing when front below this (m)
-    front_clear=0.38,        # hysteresis: front clear above this (m)
+    side="right",            # regla de la mano derecha por defecto
+    wall_target=0.20,        # distancia LiDAR->pared confirmada para el robot 9
+    wall_block=0.14,         # lado considerado muy cerca por debajo de esto (m)
+    wall_lost=0.55,          # lado considerado "apertura" en un pasillo de ~60cm
+    wall_align_enabled=True, # usa los rayos laterales frontal/trasero para mantener al robot paralelo a la pared derecha
+    wall_align_tol=0.04,     # m: delta frontal-lateral vs trasero-lateral considerado alineado
+    wall_align_kp=1.2,       # corrección angular por metro de desvío de la pared lateral
+    wall_align_w_max=0.18,   # corrección angular máxima por alineación de pared lateral
+    wall_align_max_range=0.50,# solo confiar en la alineación mientras una pared lateral sea realmente visible
+    corner_align_enabled=True,# corta los giros de 90° por geometría: frente abierto + pared trasera + pared lateral
+    corner_rear_max=0.45,    # m: la pared de atrás debe ser visible tras una esquina correcta
+    corner_side_max=0.38,    # m: la pared seguida debe ser visible al costado
+    corner_min_turn_t=0.45,  # s: ignora el detector de esquina justo al inicio de un giro
+    front_block=0.30,        # frente considerado bloqueado por debajo de esto (m)
+    front_slow=0.50,         # empieza a frenar cuando el frente está debajo de esto (m)
+    front_clear=0.38,        # histéresis: frente despejado por encima de esto (m)
     kp=0.70, kd=1.60,        # PD suave: evita giro errático con target lateral corto
-    deadband=0.03,           # m: narrow band around the 20cm LiDAR target
+    deadband=0.03,           # m: banda angosta alrededor del target de 20cm del LiDAR
     v_max=0.18, v_min=0.06,  # m/s — más controlable en pasillo de ~60cm
     w_max=1.5,               # rad/s
-    turn_speed=1.5,          # rad/s during 90/180 turns (subido de 0.9: + potencia de giro en esquinas, Henry)
-    front_sector=12.0,       # +/- deg around 0 for FRONT; narrow avoids side-wall false TURN_IN
+    turn_speed=1.5,          # rad/s durante giros de 90/180 (subido de 0.9: + potencia de giro en esquinas)
+    front_sector=12.0,       # +/- grados alrededor de 0 para el FRENTE; angosto evita falsos TURN_IN por pared lateral
     front_angle_offset=0.0,  # deg: rota TODOS los sectores si el LiDAR está montado girado (0=el frente del LiDAR ya apunta al frente del robot). Si queda clavado en TURN_IN, probar 90/180/270 por efecto.
-    side_sector_lo=50.0,     # side sector window (deg)
+    side_sector_lo=50.0,     # ventana del sector lateral (grados)
     side_sector_hi=100.0,
     range_min=0.12, range_max=8.0,
-    control_hz=10.0,         # match MS200 ~10Hz (acting on stale scan -> overshoot)
-    # --- physical guards (FABLE/JARVIS adversarial review) ---
-    scan_timeout=0.5,        # s without /scan -> hard stop (blind-driving guard)
-    require_odom=True,       # no odom -> no motion; turns and stuck watchdog need it
-    odom_timeout=1.0,        # s without odom -> hard stop (stale pose guard)
-    turn_timeout=6.0,        # s max per odom turn -> abort if odom frozen
-    emerg_dist=0.15,         # m: front closer than this -> emergency stop
-    sector_drop=2,           # robust sector: drop N closest rays (kill lone/dual phantom)
-    front_block_persist=0.35,# s front must remain blocked before TURN_IN
-    # --- positional stuck watchdog (ALICE) ---
-    stuck_t=2.5,             # s of no positional progress while driving -> recover
-    stuck_dpos=0.03,         # m: progress threshold
-    recovery_t=1.0,          # s of reverse on stuck
+    control_hz=10.0,         # coincide con ~10Hz del MS200 (actuar sobre un scan viejo -> overshoot)
+    # --- resguardos físicos (revisión adversarial FABLE/JARVIS) ---
+    scan_timeout=0.5,        # s sin /scan -> parada dura (resguardo contra manejar a ciegas)
+    require_odom=True,       # sin odom -> sin movimiento; los giros y el watchdog de atasco lo necesitan
+    odom_timeout=1.0,        # s sin odom -> parada dura (resguardo contra pose vieja)
+    turn_timeout=6.0,        # s máx por giro de odometría -> aborta si la odometría se congela
+    emerg_dist=0.15,         # m: frente más cerca que esto -> parada de emergencia
+    sector_drop=2,           # sector robusto: descarta los N rayos más cercanos (elimina fantasmas aislados/dobles)
+    front_block_persist=0.35,# s que el frente debe permanecer bloqueado antes de TURN_IN
+    # --- watchdog de atasco posicional (ALICE) ---
+    stuck_t=2.5,             # s sin progreso posicional mientras avanza -> recuperación
+    stuck_dpos=0.03,         # m: umbral de progreso
+    recovery_t=1.0,          # s de reversa al atascarse
     recover_persist=1.0,     # s que el dead-end debe PERSISTIR antes del 180° (un roce no dispara; FABLE)
-    # --- loop completion (FABLE) wired into the FSM: auto-stop after one lap ---
-    enable_loop_stop=True,   # stop for good after completing one loop of the circuit
-    loop_away_dist=1.0,      # m to get away from START before arming the return
-    loop_return_dist=0.40,   # m near START that counts as "returned"
-    loop_min_path=6.0,       # m min path traveled to validate the lap (anti-jitter, ~loop perimeter; FABLE)
+    # --- finalización de vuelta (FABLE) conectada a la FSM: auto-parada tras una vuelta ---
+    enable_loop_stop=True,   # detenerse definitivamente tras completar una vuelta del circuito
+    loop_away_dist=1.0,      # m para alejarse de START antes de armar el retorno
+    loop_return_dist=0.40,   # m cerca de START que cuenta como "regresó"
+    loop_min_path=6.0,       # m mínimos recorridos para validar la vuelta (anti-jitter, ~perímetro del lazo; FABLE)
     # --- geometría del robot: los umbrales ADAPTATIVOS derivan de aquí, NO del laberinto ---
-    # (robusto a cualquier ancho de pasillo el día de la prueba — punto de Henry; diseño NEXUS)
-    robot_width=0.16,        # m, ancho del robot (Yahboom de Henry = 16cm)
+    # (robusto a cualquier ancho de pasillo el día de la prueba)
+    robot_width=0.16,        # m, ancho del robot (Yahboom = 16cm)
     robot_length=0.22,       # m, largo del robot (22cm) — el clearance frontal usa el LARGO
-    wall_clearance=0.12,     # m, borde->pared; da ~0.20m LiDAR->pared (Henry robot9)
-    corridor_width=0.60,     # m, ancho aproximado del pasillo/laberinto (Henry robot9)
+    wall_clearance=0.12,     # m, borde->pared; da ~0.20m LiDAR->pared (robot9)
+    corridor_width=0.60,     # m, ancho aproximado del pasillo/laberinto (robot9)
     veer_gain=1.2,           # ganancia del esquive lateral (VEER hacia el lado con más espacio)
     veer_min_w=0.55,         # giro minimo sostenido durante esquive (no micro-zigzag)
     veer_timeout=4.0,        # s máx del esquive comprometido antes de expirar (FABLE: si no libra, caer al flujo normal)
     veer_min_dist=0.85,      # m mínimo comprometido: margen extra contra roce de caja
     veer_min_t=2.3,          # s mínimo de rodeo aunque el frente se libere momentáneamente
-    veer_out_angle=4.0,      # deg: tiny lane shift, not a box-circling turn
-    veer_out_speed=0.10,     # m/s during OUT; shallow arc keeps the lane
-    veer_out_kp=1.0,         # proportional yaw controller for gentle OUT arc
-    veer_turn_speed=0.08,    # rad/s max during OUT; prevent 90/120-degree-looking dodge
-    veer_pass_speed=0.08,    # m/s while committed alongside the box
-    veer_max_yaw_delta=25.0, # deg: anti-180 guard during box bypass
-    veer_finish_yaw_tol=25.0,# deg: parallel wall alone is not enough; heading must still match route
-    veer_force_away_from_wall=True, # right-wall course: always dodge left, never into the wall box
-    veer_back_enabled=False, # protrusion on right wall: pass straight, then let wall-follower reacquire
-    veer_resume_t=0.0,       # protrusion mode: return control to wall-follower immediately
-    veer_grace_t=0.8,        # suppress re-detecting the same protrusion while wall-follow reacquires
-    post_veer_reacquire_t=3.0,    # s: after a right-wall box, do not take a fake TURN_OUT corner
-    post_veer_reacquire_dist=0.30,# m: drive forward until the right wall is reacquired
-    post_veer_wall_max=0.42,      # m: followed wall close enough to hand control back to wall-follow
-    post_veer_w_max=0.10,         # rad/s: only gentle steering during reacquire, never a 90° turn
+    veer_out_angle=4.0,      # grados: pequeño desplazamiento de carril, no un giro de rodeo completo
+    veer_out_speed=0.10,     # m/s durante OUT; un arco suave mantiene el carril
+    veer_out_kp=1.0,         # controlador proporcional de yaw para un arco OUT suave
+    veer_turn_speed=0.08,    # rad/s máx durante OUT; evita un esquive que parezca un giro de 90/120 grados
+    veer_pass_speed=0.08,    # m/s mientras está comprometido bordeando la caja
+    veer_max_yaw_delta=25.0, # grados: resguardo anti-180 durante el rodeo de la caja
+    veer_finish_yaw_tol=25.0,# grados: pared paralela sola no alcanza; el rumbo también debe coincidir con la ruta
+    veer_force_away_from_wall=True, # circuito de pared derecha: siempre esquivar a la izquierda, nunca hacia la caja de la pared
+    veer_back_enabled=False, # protuberancia en pared derecha: pasar derecho, luego dejar que el seguidor de pared reacople
+    veer_resume_t=0.0,       # modo protuberancia: devuelve el control al seguidor de pared inmediatamente
+    veer_grace_t=0.8,        # suprime volver a detectar la misma protuberancia mientras el seguidor de pared reacopla
+    post_veer_reacquire_t=3.0,    # s: tras una caja en la pared derecha, no tomar una esquina TURN_OUT falsa
+    post_veer_reacquire_dist=0.30,# m: avanzar hasta reacoplar la pared derecha
+    post_veer_wall_max=0.42,      # m: pared seguida lo bastante cerca como para devolver el control al seguidor de pared
+    post_veer_w_max=0.10,         # rad/s: solo dirección suave durante el reacople, nunca un giro de 90°
     veer_resume_speed=0.12,  # m/s durante RESUME/GRACE
     obstacle_detect=0.35,    # caja localizada al frente; no anticipar tanto que confunda pared
     obstacle_clear=0.65,     # frente suficientemente libre para terminar esquive
-    box_shoulder_sector_lo=18.0, # shoulders used to distinguish localized box vs wall
+    box_shoulder_sector_lo=18.0, # hombros usados para distinguir una caja localizada de una pared
     box_shoulder_sector_hi=45.0,
     box_shoulder_margin=0.12,
     enable_obstacle_veer=True, # variante karpinchus (opcional docente): rodear cajas en el pasillo
     disable_recover_180=False, # laberinto real: SÍ hay dead-ends -> permitir el 180° de RECOVER
-    turn_in_max_accum_deg=135.0, # ANTI-CASCADA TURN_IN (ALICE): TURN_INs de 90 consecutivos SIN avance que sumen > esto = pocket -> reversa, no otro giro (evita 90+90=180). Cazado en log real de Henry.
-    turn_in_reset_clear_t=3.0,   # s de FRENTE DESPEJADO sostenido que resetea el acumulador (escape real del rincon; > que el respiro ~2s del pocket). ALICE
-    turn_in_restore_t=2.5,       # s de ventana para RESTAURAR el rumbo previo tras el corte anti-180 y seguir de frente en vez de retroceder (pedido Henry). ALICE
-    box_stop_wait_t=3.0,         # s: GUARDIÁN — parar y ESPERAR frente a cada caja antes de rodear (rúbrica RC-4 IMP3). ALICE
+    turn_in_max_accum_deg=135.0, # ANTI-CASCADA TURN_INS TURN_INs de 90 consecutivos SIN avance que sumen > esto = pocket -> reversa, no otro giro (evita 90+90=180). .
+    turn_in_reset_clear_t=3.0,   # s de FRENTE DESPEJADO sostenido que resetea el acumulador (escape real del rincon; > que el respiro ~2s del pocket). 
+    turn_in_restore_t=2.5,       # s de ventana para RESTAURAR el rumbo previo tras el corte anti-180 y seguir de frente en vez de retroceder
+    box_stop_wait_t=3.0,         # s: GUARDIÁN — parar y ESPERAR frente a cada caja antes de rodear (rúbrica RC-4 IMP3).
     open_space_straight=False, # modo opcional; por defecto manda el wall-follower del laberinto
     straight_when_no_wall=True, # si no ve pared lateral útil, avanza recto hasta reacoplar
     heading_kp=1.2,          # correccion suave de rumbo recto
     heading_w_max=0.45,      # limite angular para no ondular en linea recta
     min_side_clearance=0.23, # lado libre minimo para esquivar una caja
     adaptive_geom=True,      # derivar umbrales de W/L (apagar = usar los fijos de arriba)
-    debug_report_enabled=True, # write a decision report file on the robot
+    debug_report_enabled=True, # escribe un archivo de reporte de decisiones en el robot
     debug_report_path="/tmp/capytown_maze_report.log",
     debug_report_period=0.5,   # s between periodic report lines
     # ---------------- Calibración de escala del odómetro ----------------
-    # Portado del repo de referencia (frayderMM/Reto-Final-ROBOTICA-
     # Yahboom-ROSMASTER-, sección 5.1 del README): el /odom_raw del
     # ROSMASTER R2 sobreestima tanto distancia como ángulo girado de
     # forma CONSISTENTE (no es ruido aleatorio, es un factor de escala
@@ -663,22 +682,22 @@ if _HAVE_ROS:
             self.count_topic = self.declare_get("count_topic", "/cajas_avistadas")
             # --- UMBRALES ADAPTATIVOS derivados de la geometría del robot (diseño NEXUS) ---
             # El LiDAR mide desde ~el centro. Anclar al robot (W/L), no al laberinto, hace que
-            # funcione a cualquier ancho de pasillo (robusto el día de la prueba — Henry).
+            # funcione a cualquier ancho de pasillo (robusto el día de la prueba).
             W = float(self.p["robot_width"]); L = float(self.p["robot_length"])
             clearance = float(self.p.get("wall_clearance", 0.12))
             corridor = float(self.p.get("corridor_width", 0.60))
             self.robot_diag = math.hypot(W, L)            # pasillo mínimo para rotar en sitio (~0.27 con W/L de Henry)
             if self.p.get("adaptive_geom", True):
-                # /scan mide desde el LiDAR (~centro), no desde el borde. Henry confirmó
+                # /scan mide desde el LiDAR (~centro), no desde el borde.
                 # 20cm de LiDAR a pared; con W=16cm eso equivale a ~12cm del borde.
                 self.p["wall_target"] = max(W / 2 + clearance, W / 2 + 0.04)
                 self.p["wall_block"]  = max(W / 2 + 0.04, min(self.p["wall_target"] - 0.03, W / 2 + clearance * 0.5))
                 self.p["front_block"] = max(L / 2 + 0.18, self.p["front_block"])
                 self.p["front_slow"]  = max(self.p["front_slow"], self.p["front_block"] + 0.18)
                 self.p["front_clear"] = max(self.p["front_clear"], self.p["front_block"] + 0.08)
-                # Keep obstacle_detect independent from front_slow. For the
-                # boxes-loop challenge, too large a detect distance makes
-                # normal walls/corners look like boxes.
+                # Mantener obstacle_detect independiente de front_slow. Para
+                # el reto de lazo con cajas, una distancia de detección muy
+                # grande hace que paredes/esquinas normales parezcan cajas.
                 self.p["obstacle_clear"] = max(self.p.get("obstacle_clear", 0.0),
                                                self.p["obstacle_detect"] + 0.15)
                 self.p["emerg_dist"]  = max(L / 2 + 0.05, self.p["emerg_dist"])
@@ -692,7 +711,7 @@ if _HAVE_ROS:
             # loop-completion: no aplica al Gran Prix (la META lo reemplaza) -> deshabilitado.
             self.loop = None
             self.loop_done = False
-            self.boxes_count = 0      # census from box_detector (/cajas_avistadas)
+            self.boxes_count = 0      # censo desde box_detector (/cajas_avistadas)
 
             # ---------------- Gran Prix: fusión PARE (cámara) ----------------
             self.pare_flag = False        # último valor recibido en /pare_detectado
@@ -719,16 +738,16 @@ if _HAVE_ROS:
 
             self.state = "FOLLOW_WALL"
             self.scan = None
-            self.scan_stamp = None       # wall-clock(s) of last /scan (stale guard)
+            self.scan_stamp = None       # reloj de pared (s) del último /scan (resguardo de datos viejos)
             self.yaw = 0.0
-            self.odom_stamp = None       # wall-clock(s) of last odom (stale guard)
-            self.turn_target = None      # target yaw during a turn
-            self.turn_start = None       # wall-clock(s) turn began (watchdog)
+            self.odom_stamp = None       # reloj de pared (s) de la última odometría (resguardo de datos viejos)
+            self.turn_target = None      # yaw objetivo durante un giro
+            self.turn_start = None       # reloj de pared (s) cuando empezó el giro (watchdog)
             self.have_odom = False
-            self.fault_reason = None     # set on non-recoverable safety faults
+            self.fault_reason = None     # se fija ante fallas de seguridad no recuperables
             self._warned_no_odom = False
             self._warned_odom_stale = False
-            self.prev_front_blocked = False   # front hysteresis memory
+            self.prev_front_blocked = False   # memoria de histéresis del frente
             self.front_block_time = 0.0       # anti-falso TURN_IN: bloqueo frontal debe persistir
             self.turn_in_accum_deg = 0.0      # ANTI-CASCADA (ALICE): grados TURN_IN acumulados sin escapar del rincon
             self.front_clear_run = 0.0        # s de frente DESPEJADO sostenido -> resetea el acumulador (escape real, no avance-hacia-obstaculo)
@@ -737,7 +756,7 @@ if _HAVE_ROS:
             self.restore_yaw_target = None
             self.box_stop_until = 0.0   # GUARDIÁN (rúbrica RC-4 IMP3): timer de la parada 3s frente a caja (ALICE)
             self.box_stopped = False    # ya cumplió la parada 3s para la caja actual (no re-parar durante el rodeo)
-            # positional stuck watchdog (ALICE)
+            # watchdog de atasco posicional (ALICE)
             self.pos = None
             self.ref_pos = None
             self.stuck_time = 0.0
@@ -755,7 +774,7 @@ if _HAVE_ROS:
             self.veer_grace_until = 0.0
             self.post_veer_until = 0.0
             self.post_veer_start = None
-            self.heading_ref = None    # odom yaw reference for straight open-course driving
+            self.heading_ref = None    # referencia de yaw de odometría para avanzar derecho en tramo abierto
             self._report_last = 0.0
             self._report_last_key = None
             self.report_path = str(self.p.get("debug_report_path", "/tmp/capytown_maze_report.log"))
@@ -978,7 +997,7 @@ if _HAVE_ROS:
             return Sectors(front, left, right)
 
         def front_shoulders(self):
-            """Distances in front-left/front-right shoulders for box-vs-wall gating."""
+            """Distancias en los hombros frontal-izquierdo/frontal-derecho, para distinguir caja de pared."""
             m = self.scan
             p = self.p
             d = int(p["sector_drop"])
@@ -995,10 +1014,11 @@ if _HAVE_ROS:
             return left, right
 
         def side_wall_profile(self):
-            """Return side-wall/rear hits: right_front, right_back, left_front, left_back, rear.
+            """Devuelve los golpes de pared lateral/trasera: right_front, right_back, left_front, left_back, rear.
 
-            Equal front/back distances on a side wall mean the robot is parallel
-            to that wall. This is the geometric angle gate Henry asked for.
+            Distancias frontal/trasera iguales en una pared lateral significan
+            que el robot está paralelo a esa pared. Este es el filtro
+            geométrico de ángulo que pidió Henry.
             """
             m = self.scan
             p = self.p
@@ -1106,7 +1126,7 @@ if _HAVE_ROS:
             """Return True while still turning; spins in place by odom."""
             if self.turn_target is None or not self.have_odom:
                 return False
-            # watchdog: if odom froze, err never converges -> abort, don't spin forever
+            # watchdog: si la odometría se congeló, err nunca converge -> abortar, no girar para siempre
             if (self.turn_start is not None and
                     (self.now_s() - self.turn_start) > self.p["turn_timeout"]):
                 self.get_logger().error("turn timeout -> FAULT stop (restart node to clear)")
@@ -1125,7 +1145,7 @@ if _HAVE_ROS:
             if abs(err) < math.radians(4.0) or (self._turn_sign * err < 0.0):
                 self.turn_target = None
                 self.turn_start = None
-                self.ref_pos = self.pos      # reset stuck ref after turn completes
+                self.ref_pos = self.pos      # resetea la referencia de atasco tras completar el giro
                 return False
             self.publish(0.0, self._turn_sign * self.p["turn_speed"])
             return True
@@ -1157,7 +1177,7 @@ if _HAVE_ROS:
             if self.state == "FAULT":
                 self.publish(0.0, 0.0)
                 return
-            # FABLE loop-completion wired: one full lap done -> STOP for good.
+            # FABLE: finalización de vuelta conectada -> una vuelta completa hace PARAR definitivamente.
             if self.loop_done:
                 if self.state != "DONE":
                     self.get_logger().info(
@@ -1165,15 +1185,15 @@ if _HAVE_ROS:
                     self.state = "DONE"
                 self.publish(0.0, 0.0)
                 return
-            # FIX2: stale /scan -> hard stop (never drive on frozen LiDAR data)
+            # FIX2: /scan viejo -> parada dura (nunca manejar con datos de LiDAR congelados)
             if (self.scan_stamp is not None and
                     (self.now_s() - self.scan_stamp) > p["scan_timeout"]):
                 self.get_logger().warn("scan stale -> stop")
                 self.publish(0.0, 0.0)
                 return
 
-            # Physical safety: this node depends on odom for turns and stuck
-            # detection, so do not publish nonzero velocity without fresh odom.
+            # Seguridad física: este nodo depende de la odometría para giros y
+            # detección de atasco, así que no publica velocidad distinta de cero sin odometría fresca.
             if p.get("require_odom", True):
                 now = self.now_s()
                 if not self.have_odom:
@@ -1217,7 +1237,7 @@ if _HAVE_ROS:
                            f"post_left={max(0.0, self.post_veer_until - _now):.2f}"),
                     force=True)
 
-            # finish any active turn first (turns publish linear=0)
+            # terminar primero cualquier giro activo (los giros publican linear=0)
             if self.state in ("TURN_IN", "TURN_OUT", "RECOVER"):
                 turn_age = ((self.now_s() - self.turn_start)
                             if self.turn_start is not None else 0.0)
@@ -1239,14 +1259,14 @@ if _HAVE_ROS:
                     self.publish(0.0, 0.0)
                     return
                 if self.state == "TURN_OUT":
-                    self.publish(p["v_min"], 0.0)   # creep to re-acquire corner
+                    self.publish(p["v_min"], 0.0)   # avance lento para reacoplar la esquina
                 self.state = "FOLLOW_WALL"
                 self.ref_pos = self.pos
                 self.heading_ref = self.yaw
-                self.prev_err = 0.0   # reset D memory after a turn (no stale-derr spike)
+                self.prev_err = 0.0   # resetea la memoria D tras un giro (sin pico de derr viejo)
                 return
 
-            # recovery reverse in progress (stuck watchdog)
+            # reversa de recuperación en curso (watchdog de atasco)
             if self.recovery > 0.0:
                 self.recovery -= dt
                 self.publish(-p["v_min"], 0.0)
@@ -1360,7 +1380,7 @@ if _HAVE_ROS:
                 self.publish(0.0, 0.0)
                 return
 
-            # stuck watchdog: no positional progress while following -> reverse
+            # watchdog de atasco: sin progreso posicional mientras sigue la pared -> reversa
             if self.have_odom and self.pos is not None:
                 if self.ref_pos is None:
                     self.ref_pos = self.pos
@@ -1377,10 +1397,10 @@ if _HAVE_ROS:
                         self.stuck_time = 0.0
                         return
 
-            # front hysteresis: enter blocked at front_block, leave at front_clear.
-            # Then require persistence before handing "blocked" to the FSM. On robot 9
-            # the front sector can briefly catch lateral wall/corner returns; without this
-            # debounce, TURN_IN wins every tick and the robot spins in circles.
+            # histéresis de frente: entra bloqueado en front_block, sale en front_clear.
+            # Luego exige persistencia antes de pasarle "bloqueado" a la FSM. En el robot 9
+            # el sector frontal puede captar brevemente retornos de pared lateral/esquina; sin
+            # este debounce, TURN_IN gana en cada tick y el robot gira en círculos.
             if self.prev_front_blocked:
                 raw_fb = s.front < p["front_clear"]
             else:
@@ -1401,10 +1421,11 @@ if _HAVE_ROS:
             fb = raw_fb and self.front_block_time >= p.get("front_block_persist", 0.0)
             now_for_veer = self.now_s()
 
-            # VEER_RESUME: for free boxes this can hold heading briefly. For
-            # Henry's right-wall protrusions (veer_back_enabled=false), do NOT
-            # keep heading-hold after the pass; immediately let wall-follow
-            # reacquire the right wall while suppressing only re-detection.
+            # VEER_RESUME: para cajas sueltas esto puede mantener el rumbo
+            # brevemente. Para las protuberancias de pared derecha de Henry
+            # (veer_back_enabled=false), NO mantener el heading-hold después
+            # del paso; dejar que el seguidor de pared reacople de inmediato
+            # la pared derecha, suprimiendo solo la re-detección.
             if now_for_veer < self.veer_resume_until:
                 target = self.veer_entry_yaw if self.veer_entry_yaw is not None else self.yaw
                 lin, ang = heading_hold_cmd(self.yaw, target, p)
@@ -1426,12 +1447,14 @@ if _HAVE_ROS:
                     self.publish(min(lin, p.get("veer_resume_speed", 0.12)), ang)
                     return
 
-            # POST-VEER REACQUIRE: a box attached/protruding from the right wall can
-            # make the followed wall look "lost" immediately after the pass. If the
-            # normal FSM sees that as a corner it triggers TURN_OUT (90°) and the
-            # robot heads back in the opposite direction. For Henry's boxes-loop,
-            # after a protrusion bypass we suppress FSM turns briefly and just
-            # advance/gently reacquire the right wall.
+            # POST-VEER REACQUIRE: una caja pegada/sobresaliendo de la pared
+            # derecha puede hacer que la pared seguida parezca "perdida"
+            # justo después del paso. Si la FSM normal ve eso como una
+            # esquina, dispara TURN_OUT (90°) y el robot termina yendo en
+            # dirección opuesta. Para el lazo con cajas de Henry, tras
+            # rodear una protuberancia suprimimos brevemente los giros de
+            # la FSM y solo avanzamos/reacoplamos suavemente la pared
+            # derecha.
             if now_for_veer < self.post_veer_until:
                 post_moved = (
                     math.hypot(self.pos[0] - self.post_veer_start[0],
@@ -1461,8 +1484,9 @@ if _HAVE_ROS:
                               else self.yaw)
                     _, ang = heading_hold_cmd(self.yaw, target, p)
                     if wall_reacquired:
-                        # Once the wall is visible, let side geometry pull gently
-                        # toward the right wall without allowing a turn state.
+                        # Una vez que la pared es visible, dejar que la
+                        # geometría lateral tire suavemente hacia la pared
+                        # derecha sin permitir un estado de giro.
                         err = p["wall_target"] - follow_wall
                         sign = 1.0 if side == "right" else -1.0
                         ang += sign * p.get("kp", 0.7) * err
@@ -1518,9 +1542,9 @@ if _HAVE_ROS:
                         self.prev_front_blocked = False
                         self.front_block_time = 0.0
 
-                    # TIMEOUT/DIST cap: do not reverse into the box. If the
-                    # bypass took too long, recover heading and let the main FSM
-                    # decide from fresh sectors.
+                    # TOPE de TIEMPO/DISTANCIA: no retroceder hacia la caja.
+                    # Si el rodeo tardó demasiado, recuperar el rumbo y dejar
+                    # que la FSM principal decida con sectores frescos.
                     if (moved > max(0.90, 4.0 * p["robot_length"])) or (veer_elapsed > p["veer_timeout"]):
                         finish_veer()
                         return
@@ -1729,7 +1753,7 @@ if _HAVE_ROS:
                 self.begin_turn(-1.0 if side == "right" else +1.0, 90.0)
                 return
             self.state = "FOLLOW_WALL"
-            # track lateral error across ticks so follow_cmd can apply D-damping
+            # trackea el error lateral entre ticks para que follow_cmd pueda aplicar el amortiguado D
             wall = s.right if side == "right" else s.left
             err = p["wall_target"] - wall
             lin, ang = follow_cmd(s, p, prev_err=getattr(self, "prev_err", 0.0), dt=dt)
@@ -1783,7 +1807,7 @@ if _HAVE_ROS:
             rclpy.shutdown()
 else:
     def main(args=None):
-        raise SystemExit("ROS2 (rclpy) not available in this environment.")
+        raise SystemExit("ROS2 (rclpy) no disponible en este entorno.")
 
 
 if __name__ == "__main__":
