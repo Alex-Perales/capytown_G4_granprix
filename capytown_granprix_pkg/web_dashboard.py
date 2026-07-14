@@ -77,6 +77,26 @@ BG = "#0b1120"
 FG = "white"
 COLOR_PARED = "#3fa7ff"
 COLOR_CAJA = "#ffa500"
+COLOR_WALL = "#17c0e6"
+
+# Croquis del laberinto (módulos de 0.6 m), en el marco de /odom_raw con
+# INICIO = (0, 0). Convertido 1:1 desde el layout de rejilla (4 columnas x 6
+# filas, fila 0 arriba) de laberinto.py — editar ahí y volver a convertir si
+# cambia el diseño. Mientras tanto es solo referencia visual, no viene del LiDAR.
+MAZE_EXTENT = (-0.2, 2.6, -0.2, 3.8)  # xmin, xmax, ymin, ymax
+MAZE_WALLS = [
+    # ---- bordes exteriores ----
+    (0.0, 3.6, 2.4, 3.6), (0.0, 0.0, 2.4, 0.0),
+    (0.0, 3.6, 0.0, 0.0), (2.4, 3.6, 2.4, 0.0),
+    # ---- paredes horizontales internas ----
+    (0.6, 3.0, 1.2, 3.0), (1.2, 2.4, 1.8, 2.4),
+    (0.6, 1.8, 1.2, 1.8), (1.8, 1.8, 2.4, 1.8),
+    (0.0, 1.2, 0.6, 1.2), (2.1, 1.2, 2.4, 1.2),
+    (1.2, 0.6, 1.8, 0.6),
+    # ---- paredes verticales internas ----
+    (0.6, 3.0, 0.6, 2.4), (0.6, 1.2, 0.6, 0.6),
+    (1.2, 2.4, 1.2, 1.2), (1.8, 3.6, 1.8, 2.4),
+]
 
 # Parámetros editables desde el dashboard — set curado a propósito (no
 # cualquier parámetro) para no exponer un control que pueda romper la FSM.
@@ -91,6 +111,7 @@ EDITABLE_PARAMS = {
 
 
 def _jpeg_from_bgr(frame, quality=70):
+    # Codifica un frame BGR de OpenCV a bytes JPEG.
     if not _HAVE_CV or frame is None:
         return None
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
@@ -100,6 +121,7 @@ def _jpeg_from_bgr(frame, quality=70):
 def _fig_to_jpeg(fig, quality=70):
     """Renderiza una Figure de matplotlib (backend Agg) a bytes JPEG, sin
     tocar disco ni abrir ninguna ventana."""
+    # Dibuja el canvas y convierte el buffer RGBA resultante a JPEG.
     fig.canvas.draw()
     buf = np.asarray(fig.canvas.buffer_rgba())
     bgr = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
@@ -109,6 +131,7 @@ def _fig_to_jpeg(fig, quality=70):
 if _HAVE_ROS:
     class WebDashboard(Node):
         def __init__(self):
+            # Declara parámetros, crea subs/pub y arranca los timers de render y pausa.
             super().__init__("web_dashboard")
             self.declare_parameter("scan_topic", "/scan")
             self.declare_parameter("odom_topic", "/odom_raw")
@@ -167,12 +190,15 @@ if _HAVE_ROS:
 
         # ---------------- suscripciones ----------------
         def _on_scan(self, msg):
+            # Guarda el último LaserScan recibido para el render periódico.
             self.scan = msg
 
         def _on_state(self, msg):
+            # Actualiza el texto de estado de la FSM mostrado en el header.
             self.state_text = msg.data
 
         def _on_odom(self, msg):
+            # Actualiza posición actual y acumula el rastro para el mapa del recorrido.
             p = msg.pose.pose.position
             self.pos = (p.x, p.y)
             self.trail_x.append(p.x)
@@ -182,6 +208,7 @@ if _HAVE_ROS:
                 self.trail_y = self.trail_y[-5000:]
 
         def _on_camera(self, msg):
+            # Convierte el frame de cámara a JPEG y lo guarda para el streaming MJPEG.
             if not (_HAVE_CV and _HAVE_BRIDGE and self.bridge is not None):
                 return
             try:
@@ -195,12 +222,14 @@ if _HAVE_ROS:
 
         # ---------------- render periódico (hilo principal de rclpy) ----------------
         def _render_plots(self):
+            # Timer periódico que dispara el redibujado del scan y del recorrido.
             if not _HAVE_MPL:
                 return
             self._draw_scan()
             self._draw_path()
 
         def _draw_scan(self):
+            # Dibuja el scan del LiDAR en el marco del robot, con clasificación PARED/CAJA.
             ax = self._ax_scan
             ax.clear()
             ax.set_facecolor(BG)
@@ -230,26 +259,42 @@ if _HAVE_ROS:
                 ax.plot(0, 0, marker="s", markersize=9, color=FG)
                 ax.set_xlim(-1.5, 1.5)
                 ax.set_ylim(-1.5, 1.5)
-            ax.tick_params(colors=FG, labelsize=7)
+            ax.axis("off")
             jpg = _fig_to_jpeg(self._fig_scan)
             if jpg is not None:
                 with self._lock:
                     self._scan_jpg = jpg
 
         def _draw_path(self):
+            # Dibuja el croquis del laberinto y el recorrido acumulado en el marco odom.
             ax = self._ax_path
             ax.clear()
             ax.set_facecolor(BG)
             ax.set_title("Recorrido del robot (marco odom)", color=FG, fontsize=9)
+
+            xmin, xmax, ymin, ymax = MAZE_EXTENT
+            for gx in (0.6, 1.2, 1.8):
+                ax.plot([gx, gx], [ymin, ymax], color="#1e2b45", linewidth=1, linestyle=(0, (2, 3)))
+            for gy in (0.6, 1.2, 1.8, 2.4, 3.0):
+                ax.plot([xmin, xmax], [gy, gy], color="#1e2b45", linewidth=1, linestyle=(0, (2, 3)))
+            for x1, y1, x2, y2 in MAZE_WALLS:
+                for lw, a in ((9, 0.12), (6, 0.20), (4, 0.32)):
+                    ax.plot([x1, x2], [y1, y2], color=COLOR_WALL, linewidth=lw,
+                            alpha=a, solid_capstyle="round")
+                ax.plot([x1, x2], [y1, y2], color=COLOR_WALL, linewidth=2.2, solid_capstyle="round")
+
             if self.trail_x:
-                ax.plot(self.trail_x, self.trail_y, color=COLOR_PARED, linewidth=1.5)
+                ax.plot(self.trail_x, self.trail_y, color="white", linewidth=1.2, alpha=0.6)
                 ax.plot(self.trail_x[0], self.trail_y[0], marker="o", color="lime", markersize=7)
                 ax.plot(self.pos[0], self.pos[1], marker="o", color="red", markersize=7)
             else:
-                ax.text(0.5, 0.5, "esperando /odom_raw...", color=FG, ha="center",
-                         transform=ax.transAxes)
-            ax.set_aspect("equal", adjustable="datalim")
-            ax.tick_params(colors=FG, labelsize=7)
+                ax.plot(0, 0, marker="o", color="lime", markersize=7)
+                ax.text(0.5, -0.06, "esperando /odom_raw...", color=FG, ha="center",
+                         transform=ax.transAxes, fontsize=8)
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+            ax.set_aspect("equal", adjustable="box")
+            ax.axis("off")
             jpg = _fig_to_jpeg(self._fig_path)
             if jpg is not None:
                 with self._lock:
@@ -257,15 +302,18 @@ if _HAVE_ROS:
 
         # ---------------- pausa ----------------
         def _republish_pause(self):
+            # Timer periódico que re-publica el estado de pausa actual (por si un nodo se reinicia).
             self.pub_pause.publish(Bool(data=self.paused))
 
         def toggle_pause(self):
+            # Invierte el estado de pausa y lo publica de inmediato.
             self.paused = not self.paused
             self.pub_pause.publish(Bool(data=self.paused))
             return self.paused
 
         # ---------------- parámetros ----------------
         def set_param(self, node_name, param_name, raw_value):
+            # Valida y envía un cambio de parámetro al nodo indicado vía servicio ROS.
             spec = EDITABLE_PARAMS.get(node_name)
             if not spec or param_name not in spec:
                 return False, "parámetro no editable desde el dashboard"
@@ -306,6 +354,7 @@ if _HAVE_ROS:
 
         # ---------------- snapshot para /api/state ----------------
         def get_state(self):
+            # Devuelve un snapshot serializable del estado actual para /api/state.
             with self._lock:
                 return {
                     "fsm": self.state_text,
@@ -314,6 +363,7 @@ if _HAVE_ROS:
                 }
 
         def get_jpeg(self, which):
+            # Devuelve el último JPEG generado para el stream solicitado (camera/scan/path).
             with self._lock:
                 return {"camera": self._camera_jpg, "scan": self._scan_jpg,
                         "path": self._path_jpg}.get(which)
@@ -321,46 +371,55 @@ if _HAVE_ROS:
 
     INDEX_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CapyTown Gran Prix — Dashboard</title>
 <style>
-  body { background:#0b1120; color:#e6edf5; font-family: system-ui, sans-serif; margin:0; padding:16px; }
-  h1 { font-size:1.2rem; margin:0 0 12px; }
-  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
-  .panel { background:#0f1830; border:1px solid #22314f; border-radius:8px; padding:8px; }
-  .panel img { width:100%; display:block; border-radius:4px; background:#000; }
-  .wide { grid-column: 1 / -1; }
-  #fsm { font-family: monospace; color:#7CFC7C; white-space: pre-wrap; }
+  html, body { height:100%; margin:0; }
+  body { background:#0b1120; color:#e6edf5; font-family: system-ui, sans-serif;
+         display:flex; flex-direction:column; overflow:hidden; }
+  header { flex:0 0 auto; display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+           padding:10px 16px; border-bottom:1px solid #22314f; background:#111a30; }
+  h1 { font-size:1rem; margin:0; white-space:nowrap; }
+  #fsm { font-family: monospace; color:#7CFC7C; white-space: pre; font-size:0.8rem; }
+  .grid { flex:1 1 auto; min-height:0; display:grid; grid-template-columns: repeat(3, 1fr);
+          gap:10px; padding:10px; }
+  .panel { min-height:0; display:flex; flex-direction:column; background:#0f1830;
+           border:1px solid #22314f; border-radius:8px; padding:6px; }
+  .panel h2 { margin:0 0 6px; font-size:0.75rem; font-weight:600; color:#9fb3d9;
+              text-transform:uppercase; letter-spacing:.03em; text-align:center; }
+  .imgwrap { flex:1 1 auto; min-height:0; display:flex; }
+  .panel img { width:100%; height:100%; object-fit:contain; border-radius:4px; background:#000; }
   button { background:#2563eb; color:white; border:none; border-radius:6px; padding:8px 16px;
            font-size:0.95rem; cursor:pointer; }
   button.paused { background:#dc2626; }
-  form.params { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+  form.params { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   select, input { background:#0b1120; color:#e6edf5; border:1px solid #22314f; border-radius:4px;
                   padding:4px 6px; }
   #paramMsg { margin-left:8px; font-size:0.85rem; }
 </style></head>
 <body>
-  <h1>CapyTown Gran Prix — Dashboard en vivo</h1>
+  <header>
+    <h1>CapyTown Gran Prix — Dashboard</h1>
+    <div id="fsm">FSM: —</div>
+    <button id="pauseBtn" onclick="togglePause()">Pausar</button>
+    <form class="params" onsubmit="return setParam(event)">
+      <select id="pNode">
+        <option value="maze_solver">maze_solver</option>
+        <option value="pare_detector">pare_detector</option>
+      </select>
+      <select id="pName">
+        <option value="v_max">v_max</option>
+        <option value="side">side</option>
+      </select>
+      <input id="pValue" placeholder="valor (ej. 0.12 / right / true)">
+      <button type="submit">Aplicar</button>
+      <span id="paramMsg"></span>
+    </form>
+  </header>
   <div class="grid">
-    <div class="panel"><img src="/stream/camera" alt="camara"></div>
-    <div class="panel"><img src="/stream/scan" alt="scan"></div>
-    <div class="panel wide"><img src="/stream/path" alt="recorrido"></div>
-    <div class="panel wide">
-      <div id="fsm">FSM: —</div>
-      <button id="pauseBtn" onclick="togglePause()">Pausar</button>
-      <form class="params" onsubmit="return setParam(event)">
-        <select id="pNode">
-          <option value="maze_solver">maze_solver</option>
-          <option value="pare_detector">pare_detector</option>
-        </select>
-        <select id="pName">
-          <option value="v_max">v_max</option>
-          <option value="side">side</option>
-        </select>
-        <input id="pValue" placeholder="valor (ej. 0.12 / right / true)">
-        <button type="submit">Aplicar</button>
-        <span id="paramMsg"></span>
-      </form>
-    </div>
+    <div class="panel"><h2>Cámara</h2><div class="imgwrap"><img src="/stream/camera" alt="camara"></div></div>
+    <div class="panel"><h2>LiDAR, segmentación</h2><div class="imgwrap"><img src="/stream/scan" alt="scan"></div></div>
+    <div class="panel"><h2>Mapa del recorrido</h2><div class="imgwrap"><img src="/stream/path" alt="recorrido"></div></div>
   </div>
 <script>
 const paramsByNode = {
@@ -414,6 +473,7 @@ pollState();
             pass  # silencia el log de acceso HTTP en la consola del nodo
 
         def do_GET(self):
+            # Enruta GET: página principal, snapshot de estado, o streams MJPEG.
             path = urlparse(self.path).path
             if path == "/":
                 self._text(200, INDEX_HTML, "text/html; charset=utf-8")
@@ -425,6 +485,7 @@ pollState();
                 self.send_error(404)
 
         def do_POST(self):
+            # Enruta POST: alternar pausa o aplicar un cambio de parámetro.
             path = urlparse(self.path).path
             length = int(self.headers.get("Content-Length", 0) or 0)
             body = self.rfile.read(length) if length else b""
@@ -443,6 +504,7 @@ pollState();
                 self.send_error(404)
 
         def _text(self, code, text, ctype):
+            # Envía una respuesta HTTP de texto plano con el content-type indicado.
             b = text.encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -451,9 +513,11 @@ pollState();
             self.wfile.write(b)
 
         def _json(self, obj):
+            # Serializa un objeto Python a JSON y lo envía como respuesta.
             self._text(200, json.dumps(obj), "application/json")
 
         def _mjpeg(self, which):
+            # Sirve un stream MJPEG infinito, empujando el último frame disponible cada 0.2s.
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=FRAME")
             self.end_headers()
@@ -472,6 +536,7 @@ pollState();
 
 
     def main(args=None):
+        # Punto de entrada: inicializa ROS, arranca el nodo y el servidor HTTP en un hilo aparte.
         if not (_HAVE_CV and _HAVE_MPL):
             missing = [n for n, ok in (("opencv-python", _HAVE_CV), ("matplotlib", _HAVE_MPL)) if not ok]
             raise SystemExit(f"web_dashboard necesita: {', '.join(missing)}")
@@ -490,6 +555,7 @@ pollState();
             rclpy.shutdown()
 else:
     def main(args=None):
+        # Fallback cuando rclpy no está disponible: el dashboard no puede correr.
         raise SystemExit("ROS2 (rclpy) no disponible aquí.")
 
 

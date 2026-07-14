@@ -52,6 +52,8 @@ import csv
 import math
 import os
 
+import numpy as np
+
 # ---- ROS imports guarded so the logic can be unit-tested without ROS ----
 try:
     import rclpy
@@ -173,6 +175,86 @@ def sector_robust(ranges, angle_min, angle_inc, lo_deg, hi_deg,
     if len(vals) > drop + 1:
         return vals[drop]        # k-th smallest after dropping `drop` closest
     return vals[0]
+
+
+def fit_wall_line(ranges, angle_min, angle_inc, lo_deg, hi_deg,
+                  range_min, range_max, min_points=6,
+                  outlier_iter=3, outlier_residual_m=0.03, offset_deg=0.0):
+    """Ajusta una recta (mínimos cuadrados) a los puntos del LiDAR dentro de
+    la ventana angular [lo_deg, hi_deg] (marco del robot, 0°=frente,
+    +90°=izquierda), en coordenadas x=adelante / y=izquierda. Mucho más
+    robusto al ruido que un sector puntual (sector_min/sector_robust,
+    arriba), porque promedia sobre TODOS los puntos válidos de la ventana
+    en vez de un único rayo mínimo.
+
+    Rechazo iterativo de outliers: cerca de una esquina, parte de la
+    ventana puede agarrar puntos de OTRA pared (perpendicular a la
+    seguida); un solo ajuste de mínimos cuadrados les da peso y sesga el
+    ángulo hasta ~30-40° falsos. Se ajusta, se descartan los puntos con
+    residuo mayor a `outlier_residual_m` y se reajusta, unas pocas veces.
+
+    Devuelve (ángulo_rad, distancia_m, válido):
+    - ángulo_rad: ángulo de la pared respecto al frente del robot (0 =
+      perfectamente paralela; convención REP-103, +CCW).
+    - distancia_m: distancia perpendicular del robot (origen del LiDAR) a
+      la recta ajustada.
+    - válido: False si no hay suficientes puntos para un ajuste confiable
+      (equivale a "sin pared de referencia en ese lado" -- pasillo abierto
+      o simplemente fuera de rango).
+
+    Portado de wall_follower_node.py / lidar_utils.py del repo de
+    referencia (frayderMM/Reto-Final-ROBOTICA-Yahboom-ROSMASTER-), que lo
+    valida en sim_local/ antes de llevarlo al robot real: alternar
+    correcciones de "solo ángulo" / "solo distancia" con un sector
+    puntual oscila indefinidamente (±1.4 cm); una corrección continua
+    ángulo+distancia sobre esta recta ajustada converge (std < 0.01 cm).
+    """
+    if not ranges:
+        return 0.0, 0.0, False
+
+    lo = math.radians(lo_deg)
+    hi = math.radians(hi_deg)
+    off = math.radians(offset_deg)
+
+    xs = []
+    ys = []
+    n = len(ranges)
+    for i in range(n):
+        try:
+            rr = float(ranges[i])
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(rr) or math.isinf(rr) or rr < range_min or rr > range_max:
+            continue
+        a = angle_min + i * angle_inc - off
+        aa = math.atan2(math.sin(a), math.cos(a))
+        in_window = (lo <= aa <= hi) if lo <= hi else (aa >= lo or aa <= hi)
+        if not in_window:
+            continue
+        xs.append(rr * math.cos(aa))
+        ys.append(rr * math.sin(aa))
+
+    if len(xs) < min_points:
+        return 0.0, 0.0, False
+
+    x = np.asarray(xs, dtype=float)
+    y = np.asarray(ys, dtype=float)
+
+    m, b = 0.0, 0.0
+    for _ in range(max(1, int(outlier_iter))):
+        try:
+            m, b = np.polyfit(x, y, 1)
+        except Exception:
+            return 0.0, 0.0, False
+        residuals = np.abs(y - (m * x + b)) / math.sqrt(m * m + 1.0)
+        inliers = residuals < outlier_residual_m
+        if bool(np.all(inliers)) or int(np.sum(inliers)) < min_points:
+            break
+        x, y = x[inliers], y[inliers]
+
+    angulo = math.atan(m)
+    distancia = abs(b) / math.sqrt(m * m + 1.0)
+    return angulo, distancia, True
 
 
 def yaw_from_quat(x, y, z, w):
@@ -480,6 +562,66 @@ DEFAULTS = dict(
     debug_report_enabled=True, # write a decision report file on the robot
     debug_report_path="/tmp/capytown_maze_report.log",
     debug_report_period=0.5,   # s between periodic report lines
+    # ---------------- Calibración de escala del odómetro ----------------
+    # Portado del repo de referencia (frayderMM/Reto-Final-ROBOTICA-
+    # Yahboom-ROSMASTER-, sección 5.1 del README): el /odom_raw del
+    # ROSMASTER R2 sobreestima tanto distancia como ángulo girado de
+    # forma CONSISTENTE (no es ruido aleatorio, es un factor de escala
+    # fijo) -- corregirlo aquí hace que avance_celda/turn_target/stuck
+    # watchdog/total_path_m (y por tanto long_ruta_cm/eficiencia en el
+    # CSV) usen la distancia y el ángulo REALES, no los que reporta el
+    # encoder. Dejar en 1.0 hasta calibrar en pista:
+    #   1. Con el robot quieto, leer /odom_raw una vez.
+    #   2. Empujarlo A MANO una distancia conocida (ej. 60cm con cinta
+    #      métrica) en línea recta, sin girarlo, y volver a leer.
+    #      factor_dist_odom = distancia_real / distancia_odom (Pitágoras
+    #      sobre el delta de posición).
+    #   3. Con el robot quieto de nuevo, girarlo A MANO un ángulo
+    #      conocido (90°, con una escuadra), sin trasladarlo.
+    #      factor_ang_odom = angulo_real / angulo_odom (yaw2-yaw1 del
+    #      quaternion).
+    #   4. Repetir 2-3 veces para confirmar que el factor es estable; si
+    #      varía mucho, sospechar de deslizamiento de ruedas, no de un
+    #      error de escala fijo.
+    factor_dist_odom=1.0,
+    factor_ang_odom=1.0,
+    # ---------------- Seguimiento de pared por regresión de línea ----------------
+    # Portado de wall_follower_node.py/lidar_utils.py del repo de
+    # referencia: ajusta una recta por mínimos cuadrados a TODOS los
+    # puntos LiDAR del lado seguido (fit_wall_line, arriba), no solo el
+    # rayo mínimo de un sector (sector_min/sector_robust) -- mucho más
+    # robusto al ruido y evita que el robot "vaya en diagonal" por
+    # corregir con un único punto ruidoso. Cuando hay suficientes puntos
+    # para un ajuste confiable (line_fit_enabled=True y line_valid=True
+    # en el tick), su corrección de ángulo+distancia SUMADA reemplaza al
+    # PD de sector puro + alineación de 2 puntos (wall_align) de más
+    # abajo; si no hay suficientes puntos (pasillo abierto, esquina),
+    # cae de vuelta al método anterior sin cambios.
+    line_fit_enabled=True,
+    # Ventana angular del lado SEGUIDO para el ajuste (marco del robot).
+    # Angosta a propósito (igual que la referencia, -110/-70 en vez de
+    # -135/-45): una ventana más ancha alcanza más lejos hacia
+    # adelante/atrás y cerca de una esquina agarra puntos de la pared
+    # perpendicular, sesgando el ángulo. Se espeja automáticamente según
+    # `side` (ver _line_window_deg en el nodo).
+    line_window_lo_deg=70.0,
+    line_window_hi_deg=110.0,
+    # Rango máximo PROPIO del ajuste, mucho más corto que range_max: sin
+    # este límite, el ajuste puede encontrar cualquier superficie lejana
+    # (el otro lado de un espacio abierto) y reportarla como "pared
+    # válida" aunque la pared realmente seguida (a ~wall_target) ya
+    # terminó.
+    line_max_range_m=0.55,
+    line_min_points=6,
+    line_outlier_iter=3,
+    line_outlier_residual_m=0.03,
+    # Ganancias de la corrección por regresión de línea (radianes/metros
+    # -> rad/s). k_line_distance arranca igual que `kp` (ya calibrado
+    # para este robot); k_line_angle es un punto de partida razonable --
+    # CALIBRAR EN PISTA (ver sección 5.3 del README de referencia): si
+    # oscila/zigzaguea, bajar ganancias; si corrige muy lento, subirlas.
+    k_line_angle=1.2,
+    k_line_distance=0.70,
     # ---------------- Gran Prix: fusión cámara (PARE) ----------------
     pare_topic="/pare_detectado",      # std_msgs/Bool, publicado por pare_detector.py
     pare_wait_t=3.0,                   # s de detención completa ante un PARE (regla del reto)
@@ -637,11 +779,11 @@ if _HAVE_ROS:
             self.pub = self.create_publisher(Twist, self.cmd_topic, 10)
 
             # ---------------- Gran Prix: fusión cámara + estado + RViz ----------------
-            self.pare_topic = self.declare_get("pare_topic", "/pare_detectado")
+            self.pare_topic = self.p["pare_topic"]
             self.sub_pare = self.create_subscription(Bool, self.pare_topic, self.on_pare, 10)
-            self.cerca_topic = self.declare_get("cerca_interseccion_topic", "/cerca_interseccion")
+            self.cerca_topic = self.p["cerca_interseccion_topic"]
             self.pub_cerca = self.create_publisher(Bool, self.cerca_topic, 10)
-            self.state_topic = self.declare_get("maze_state_topic", "/maze_state")
+            self.state_topic = self.p["maze_state_topic"]
             self.pub_state = self.create_publisher(String, self.state_topic, 10)
             # Pausa desde el dashboard web (web_dashboard.py) — seguridad manual:
             # botón "Pausar" en el navegador -> el robot se detiene YA, sin tocar
@@ -651,7 +793,7 @@ if _HAVE_ROS:
             self.sub_dashboard_pause = self.create_subscription(
                 Bool, self.dashboard_pause_topic, self.on_dashboard_pause, 10)
             if _HAVE_VIZ:
-                self.markers_topic = self.declare_get("markers_topic", "/granprix_markers")
+                self.markers_topic = self.p["markers_topic"]
                 self.pub_markers = self.create_publisher(MarkerArray, self.markers_topic, 10)
             else:
                 self.pub_markers = None
@@ -700,10 +842,16 @@ if _HAVE_ROS:
                     pass
 
         def on_odom(self, msg):
+            # Corrección de escala del odómetro (ver factor_dist_odom/
+            # factor_ang_odom en DEFAULTS, portado de la referencia): el
+            # ROSMASTER R2 sobreestima tanto distancia como ángulo girado de
+            # forma consistente. Con los valores por defecto (1.0) esto no
+            # cambia nada hasta que se calibre en pista.
             q = msg.pose.pose.orientation
-            self.yaw = yaw_from_quat(q.x, q.y, q.z, q.w)
+            self.yaw = yaw_from_quat(q.x, q.y, q.z, q.w) * float(self.p.get("factor_ang_odom", 1.0))
             pp = msg.pose.pose.position
-            self.pos = (pp.x, pp.y)
+            fd = float(self.p.get("factor_dist_odom", 1.0))
+            self.pos = (pp.x * fd, pp.y * fd)
             self.have_odom = True
             self.odom_stamp = self.now_s()
             if self.heading_ref is None:
@@ -714,20 +862,22 @@ if _HAVE_ROS:
                 self.start_time = self.now_s()
 
             # Gran Prix: acumula longitud de ruta recorrida (odometría) — para
-            # long_ruta_cm / eficiencia en metricas_granprix.csv.
+            # long_ruta_cm / eficiencia en metricas_granprix.csv. Usa la
+            # posición YA calibrada (self.pos) para que la métrica refleje
+            # la distancia real, no la que sobreestima el encoder crudo.
             if self._last_odom_pos is not None:
-                d = math.hypot(pp.x - self._last_odom_pos[0], pp.y - self._last_odom_pos[1])
+                d = math.hypot(self.pos[0] - self._last_odom_pos[0], self.pos[1] - self._last_odom_pos[1])
                 # ignora saltos absurdos (glitch de odom) para no inflar la métrica
                 if d < 0.5:
                     self.total_path_m += d
-            self._last_odom_pos = (pp.x, pp.y)
+            self._last_odom_pos = self.pos
 
             # Gran Prix: ¿llegó a META? (esquina opuesta a INICIO, medida en el marco odom)
             if self.meta_enabled and not self.meta_reached:
-                if math.hypot(pp.x - self.meta_x, pp.y - self.meta_y) <= self.meta_radius:
+                if math.hypot(self.pos[0] - self.meta_x, self.pos[1] - self.meta_y) <= self.meta_radius:
                     self.meta_reached = True
                     self.get_logger().info("🏁 META alcanzada — deteniendo y registrando métricas.")
-                    self.add_marker("META", (pp.x, pp.y), (0.1, 0.9, 0.2))
+                    self.add_marker("META", self.pos, (0.1, 0.9, 0.2))
 
         def on_count(self, msg):
             """Census de cajas (box_detector -> /cajas_avistadas), para reportarlo al parar."""
@@ -875,6 +1025,39 @@ if _HAVE_ROS:
                                    drop=d, offset_deg=off)
             rear = min(rear_a, rear_b)
             return right_front, right_back, left_front, left_back, rear
+
+        def _line_window_deg(self):
+            """Ventana angular del lado SEGUIDO (`side`) para fit_wall_line,
+            espejada automáticamente: derecha usa ángulos negativos
+            (-hi,-lo), izquierda usa positivos (lo,hi) — misma convención
+            que right_window_deg/left_window_deg de sector_robust arriba."""
+            lo = float(self.p.get("line_window_lo_deg", 70.0))
+            hi = float(self.p.get("line_window_hi_deg", 110.0))
+            if self.p["side"] == "right":
+                return -hi, -lo
+            return lo, hi
+
+        def followed_wall_line(self):
+            """Ajuste de recta (fit_wall_line) del lado SEGUIDO, en el marco
+            del robot, ya con la ventana angular y el offset de montaje
+            (front_angle_offset) aplicados. Devuelve (angulo_rad,
+            distancia_m, válido) -- válido=False si no hay suficientes
+            puntos LiDAR en la ventana (pasillo abierto, esquina, cerca de
+            un giro)."""
+            if not self.p.get("line_fit_enabled", True) or self.scan is None:
+                return 0.0, 0.0, False
+            m = self.scan
+            lo_deg, hi_deg = self._line_window_deg()
+            range_max_line = min(self.p["range_max"], float(self.p.get("line_max_range_m", 0.55)))
+            off = float(self.p.get("front_angle_offset", 0.0))
+            return fit_wall_line(
+                list(m.ranges), m.angle_min, m.angle_increment, lo_deg, hi_deg,
+                self.p["range_min"], range_max_line,
+                min_points=int(self.p.get("line_min_points", 6)),
+                outlier_iter=int(self.p.get("line_outlier_iter", 3)),
+                outlier_residual_m=float(self.p.get("line_outlier_residual_m", 0.03)),
+                offset_deg=off,
+            )
 
         def report_decision(self, label, s=None, shoulders=None, profile=None,
                             extra="", force=False):
@@ -1550,7 +1733,25 @@ if _HAVE_ROS:
             wall = s.right if side == "right" else s.left
             err = p["wall_target"] - wall
             lin, ang = follow_cmd(s, p, prev_err=getattr(self, "prev_err", 0.0), dt=dt)
-            if p.get("wall_align_enabled", True):
+
+            # Seguimiento por REGRESIÓN DE LÍNEA (portado de la referencia,
+            # ver fit_wall_line/followed_wall_line arriba): cuando hay
+            # suficientes puntos LiDAR del lado seguido para un ajuste
+            # confiable, su corrección de ángulo+distancia SUMADA reemplaza
+            # el término angular del PD de sector puro -- más robusto al
+            # ruido de un único rayo. `lin` (con el frenado por front_slow
+            # ya calculado por follow_cmd) se conserva sin cambios. Si el
+            # ajuste no es válido (pasillo abierto, esquina, pocos puntos),
+            # cae de vuelta a la alineación de 2 puntos (wall_align)
+            # existente, sin ningún cambio de comportamiento.
+            line_angle, line_dist, line_valid = self.followed_wall_line()
+            if line_valid:
+                sign_dist = 1.0 if side == "right" else -1.0
+                err_dist_line = p["wall_target"] - line_dist
+                ang = (p.get("k_line_angle", 1.2) * line_angle
+                       + sign_dist * p.get("k_line_distance", p["kp"]) * err_dist_line)
+                ang = clamp(ang, -p["w_max"], p["w_max"])
+            elif p.get("wall_align_enabled", True):
                 follow_front = right_front if side == "right" else left_front
                 follow_back = right_back if side == "right" else left_back
                 align_err = wall_parallel_error(follow_front, follow_back, side, p)

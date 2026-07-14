@@ -29,6 +29,7 @@ setup(
             "box_detector = capytown_granprix_pkg.box_detector:main",
             "scan_map_viewer = capytown_granprix_pkg.scan_map_viewer:main",
             "web_dashboard = capytown_granprix_pkg.web_dashboard:main",
+            "desktop_dashboard = capytown_granprix_pkg.desktop_dashboard:main",
             "simple_camera = capytown_granprix_pkg.simple_camera:main",
         ],
     },

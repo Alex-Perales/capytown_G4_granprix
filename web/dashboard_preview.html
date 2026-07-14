@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CapyTown Gran Prix — Dashboard (preview sin ROS)</title>
+<style>
+  :root{
+    --bg:#0b1120; --panel:#0f1830; --border:#22314f; --head:#111a30;
+    --wall:#17c0e6; --scan:#3fa7ff; --robot:#ff4d4d; --start:#38e06a;
+    --txt:#e6edf5; --muted:#9fb3d9; --fsm:#7CFC7C;
+  }
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,sans-serif;
+       display:flex;flex-direction:column;overflow:hidden}
+  header{flex:0 0 auto;display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+         padding:10px 16px;border-bottom:1px solid var(--border);background:var(--head)}
+  .brand{display:flex;flex-direction:column;line-height:1.25}
+  h1{font-size:1rem;margin:0;white-space:nowrap}
+  #fsm{font-family:ui-monospace,monospace;color:var(--fsm);font-size:.78rem}
+  #pos{font-family:ui-monospace,monospace;color:var(--muted);font-size:.72rem}
+  .spacer{flex:1 1 auto}
+  button{background:#2563eb;color:#fff;border:none;border-radius:6px;padding:8px 16px;
+         font-size:.9rem;cursor:pointer;transition:background .15s}
+  button:hover{filter:brightness(1.08)}
+  button.paused{background:#dc2626}
+  button.ghost{background:#26324f}
+  .grid{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:repeat(3,1fr);
+        gap:10px;padding:10px}
+  .panel{min-height:0;display:flex;flex-direction:column;background:var(--panel);
+         border:1px solid var(--border);border-radius:8px;padding:6px}
+  .panel h2{margin:0 0 6px;font-size:.72rem;font-weight:600;color:var(--muted);
+            text-transform:uppercase;letter-spacing:.04em;text-align:center}
+  .cv{flex:1 1 auto;min-height:0;width:100%;height:100%;display:block;
+      border-radius:6px;background:#05070d}
+  @media (max-width:820px){.grid{grid-template-columns:1fr;overflow:auto}
+    .panel{min-height:240px}}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>CapyTown Gran Prix — Dashboard <span style="color:var(--muted);font-weight:400">(preview sin ROS)</span></h1>
+      <div id="fsm">FSM: FOLLOW_WALL</div>
+      <div id="pos">pos=(0.00, 0.00)</div>
+    </div>
+    <div class="spacer"></div>
+    <button id="pauseBtn">Pausar</button>
+    <button id="clearBtn" class="ghost">Limpiar</button>
+  </header>
+
+  <div class="grid">
+    <div class="panel"><h2>Cámara (simulada)</h2><canvas id="cam" class="cv"></canvas></div>
+    <div class="panel"><h2>LiDAR — segmentación</h2><canvas id="lidar" class="cv"></canvas></div>
+    <div class="panel"><h2>Mapa del recorrido</h2><canvas id="map" class="cv"></canvas></div>
+  </div>
+
+<script>
+"use strict";
+/* ============================================================================
+   CapyTown Gran Prix — preview de dashboard 100% en el navegador (sin ROS).
+   Muestra 3 vistas en una sola pestaña:
+     1) Cámara simulada  — vista en primera persona del pasillo.
+     2) LiDAR            — barrido 360° por raycast contra las paredes.
+     3) Mapa             — laberinto con paredes celestes ESTÁTICAS y el
+                           carrito (rojo) recorriéndolo desde INICIO (abajo-der).
+   Solo cámara + LiDAR + recorrido. Sin cajas, sin señales PARE.
+   ==========================================================================*/
+
+/* ---------- Laberinto (unidades = celdas de 0.6 m, rejilla 4 x 6) ---------- */
+const W = 4, H = 6;                         // ancho x alto en celdas (0.6 m c/u)
+// Paredes: [x1,y1,x2,y2] en celdas. Origen abajo-izquierda, y hacia arriba.
+// Es el MISMO trazado de MAZE_WALLS de web_dashboard.py (convertido de metros
+// /0.6 a celdas) — el laberinto oficial del reto.
+const WALLS = [
+  // ---- perímetro ----
+  [0,0, 4,0], [0,6, 4,6], [0,0, 0,6], [4,0, 4,6],
+  // ---- horizontales internas ----
+  [1,5, 2,5], [2,4, 3,4], [1,3, 2,3], [3,3, 4,3],
+  [0,2, 1,2], [3.5,2, 4,2], [2,1, 3,1],
+  // ---- verticales internas ----
+  [1,5, 1,4], [1,2, 1,1], [2,4, 2,2], [3,6, 3,4]
+];
+
+// Ruta del carrito (centros de celda) por el laberinto real.
+// INICIO = abajo-derecha (3,0) → META = arriba-IZQUIERDA (0,5). Verificada:
+// no cruza ninguna pared.
+const PATH = [
+  [3.5,0.5], [2.5,0.5], [1.5,0.5], [1.5,1.5],
+  [1.5,2.5], [0.5,2.5], [0.5,3.5], [0.5,4.5], [0.5,5.5]
+];
+const START = PATH[0];
+const META  = PATH[PATH.length-1];
+
+/* ------------------------------ estado ------------------------------------ */
+let paused = false;
+let robot = { x: START[0], y: START[1], th: Math.PI/2 };  // th: rumbo (rad)
+let seg = 0, segT = 0;               // segmento actual de la ruta y avance [0..1]
+const SPEED = 0.9;                   // celdas / segundo
+let trail = [[START[0], START[1]]];
+let lastTs = null;
+
+/* --------------------------- utilidades geom ------------------------------ */
+// distancia del rayo (ox,oy)+t*(dx,dy) al segmento; +Inf si no cruza.
+function raySeg(ox,oy,dx,dy, x1,y1,x2,y2){
+  const ex=x2-x1, ey=y2-y1;
+  const den = dx*ey - dy*ex;
+  if (Math.abs(den) < 1e-9) return Infinity;
+  const t = ((x1-ox)*ey - (y1-oy)*ex) / den;   // a lo largo del rayo
+  const u = ((x1-ox)*dy - (y1-oy)*dx) / den;   // a lo largo del segmento
+  if (t >= 0 && u >= -1e-6 && u <= 1+1e-6) return t;
+  return Infinity;
+}
+function castRay(ox,oy,ang,maxR){
+  const dx=Math.cos(ang), dy=Math.sin(ang);
+  let best = maxR;
+  for (const w of WALLS){
+    const t = raySeg(ox,oy,dx,dy, w[0],w[1],w[2],w[3]);
+    if (t < best) best = t;
+  }
+  return best;
+}
+
+/* --------------------------- canvas hi-dpi -------------------------------- */
+function fit(cv){
+  const r = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width*dpr));
+  const h = Math.max(1, Math.round(r.height*dpr));
+  if (cv.width!==w || cv.height!==h){ cv.width=w; cv.height=h; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  return { ctx, w:r.width, h:r.height };
+}
+
+/* ------------------------------- física ----------------------------------- */
+function step(dt){
+  if (seg >= PATH.length-1) return;                    // llegó a META
+  const a = PATH[seg], b = PATH[seg+1];
+  const len = Math.hypot(b[0]-a[0], b[1]-a[1]);
+  segT += (SPEED*dt)/len;
+  while (segT >= 1 && seg < PATH.length-1){
+    segT -= 1; seg++;
+    if (seg >= PATH.length-1){ segT = 0; break; }
+  }
+  const s2 = PATH[Math.min(seg, PATH.length-2)];
+  const e2 = PATH[Math.min(seg+1, PATH.length-1)];
+  robot.x = s2[0] + (e2[0]-s2[0]) * Math.min(segT,1);
+  robot.y = s2[1] + (e2[1]-s2[1]) * Math.min(segT,1);
+  // rumbo suavizado hacia la dirección del segmento
+  const tgt = Math.atan2(e2[1]-s2[1], e2[0]-s2[0]);
+  let d = tgt - robot.th;
+  while (d >  Math.PI) d -= 2*Math.PI;
+  while (d < -Math.PI) d += 2*Math.PI;
+  robot.th += d * Math.min(1, dt*6);
+  // rastro
+  const last = trail[trail.length-1];
+  if (!last || Math.hypot(robot.x-last[0], robot.y-last[1]) > 0.04)
+    trail.push([robot.x, robot.y]);
+}
+
+/* ------------------------------- MAPA -------------------------------------- */
+function drawMap(){
+  const {ctx,w,h} = fit(document.getElementById("map"));
+  ctx.clearRect(0,0,w,h);
+  const pad = 18;
+  const s = Math.min((w-2*pad)/W, (h-2*pad)/H);
+  const ox = (w - s*W)/2, oy = (h - s*H)/2;
+  const X = x => ox + x*s;
+  const Y = y => oy + (H - y)*s;      // invierte y (arriba = +)
+
+  // rejilla punteada
+  ctx.strokeStyle = "rgba(63,167,255,.10)"; ctx.lineWidth = 1;
+  ctx.setLineDash([2,4]);
+  for (let gx=1; gx<W; gx++){ ctx.beginPath(); ctx.moveTo(X(gx),Y(0)); ctx.lineTo(X(gx),Y(H)); ctx.stroke(); }
+  for (let gy=1; gy<H; gy++){ ctx.beginPath(); ctx.moveTo(X(0),Y(gy)); ctx.lineTo(X(W),Y(gy)); ctx.stroke(); }
+  ctx.setLineDash([]);
+
+  // paredes ESTÁTICAS celestes (con leve glow)
+  ctx.lineCap = "round";
+  for (const g of [[10,.10],[6,.18],[3.2,1]]){
+    ctx.strokeStyle = g[1]===1 ? getCSS("--wall") : hexA(getCSS("--wall"), g[1]);
+    ctx.lineWidth = g[0];
+    for (const wl of WALLS){
+      ctx.beginPath(); ctx.moveTo(X(wl[0]),Y(wl[1])); ctx.lineTo(X(wl[2]),Y(wl[3])); ctx.stroke();
+    }
+  }
+
+  // rastro del recorrido
+  if (trail.length > 1){
+    ctx.strokeStyle = "rgba(230,237,245,.55)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(X(trail[0][0]),Y(trail[0][1]));
+    for (const p of trail) ctx.lineTo(X(p[0]),Y(p[1]));
+    ctx.stroke();
+  }
+
+  // INICIO (verde) abajo-derecha
+  dot(ctx, X(START[0]), Y(START[1]), 6, getCSS("--start"));
+  ctx.fillStyle = getCSS("--start"); ctx.font = "10px system-ui"; ctx.textAlign="right";
+  ctx.fillText("INICIO", X(START[0])-8, Y(START[1])+4);
+  // META arriba-izquierda
+  ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(X(META[0]), Y(META[1]), 7, 0, 2*Math.PI); ctx.stroke();
+  ctx.textAlign="left";
+  ctx.fillStyle = "#ffd166"; ctx.fillText("META", X(META[0])+11, Y(META[1])+4);
+
+  // carrito (rojo) con indicador de rumbo
+  const rx = X(robot.x), ry = Y(robot.y);
+  ctx.save();
+  ctx.translate(rx, ry); ctx.rotate(-robot.th);
+  ctx.fillStyle = getCSS("--robot");
+  ctx.beginPath();
+  ctx.moveTo(9,0); ctx.lineTo(-6,-6); ctx.lineTo(-3,0); ctx.lineTo(-6,6); ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  dot(ctx, rx, ry, 3.2, "#fff");
+}
+
+/* ------------------------------- LiDAR ------------------------------------- */
+function drawLidar(){
+  const {ctx,w,h} = fit(document.getElementById("lidar"));
+  ctx.clearRect(0,0,w,h);
+  const cx=w/2, cy=h/2;
+  const maxR = 2.2;                            // celdas visibles
+  const scale = Math.min(w,h)*0.42/maxR;
+
+  // anillos de referencia
+  ctx.strokeStyle = "rgba(63,167,255,.14)"; ctx.lineWidth=1;
+  for (let r=0.5; r<=maxR; r+=0.5){
+    ctx.beginPath(); ctx.arc(cx,cy,r*scale,0,2*Math.PI); ctx.stroke();
+  }
+
+  // barrido
+  const N = 240;
+  const pts = [];
+  for (let i=0;i<N;i++){
+    const ang = i/N*2*Math.PI;
+    const d = castRay(robot.x, robot.y, ang, maxR);
+    const rel = ang - robot.th;                // rumbo hacia arriba
+    const px = cx + Math.sin(rel)*d*scale;
+    const py = cy - Math.cos(rel)*d*scale;
+    pts.push([px,py, d<maxR]);
+  }
+  // silueta tenue
+  ctx.beginPath();
+  pts.forEach((p,i)=> i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(63,167,255,.06)"; ctx.fill();
+  // puntos de impacto
+  ctx.fillStyle = getCSS("--scan");
+  for (const p of pts){ if(!p[2]) continue;
+    ctx.beginPath(); ctx.arc(p[0],p[1],1.9,0,2*Math.PI); ctx.fill(); }
+
+  // haz frontal
+  const front = castRay(robot.x, robot.y, robot.th, maxR);
+  ctx.strokeStyle = "rgba(255,235,120,.7)"; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx, cy-front*scale); ctx.stroke();
+  ctx.fillStyle="#ffe878"; ctx.font="10px ui-monospace,monospace";
+  ctx.fillText((front*0.6*100).toFixed(0)+" cm", cx+6, cy-front*scale+4);
+
+  // robot (cuadro blanco)
+  ctx.fillStyle="#fff"; ctx.fillRect(cx-5,cy-5,10,10);
+}
+
+/* ------------------------------- CÁMARA ------------------------------------ */
+function drawCamera(){
+  const {ctx,w,h} = fit(document.getElementById("cam"));
+  ctx.clearRect(0,0,w,h);
+
+  const hor = h*0.5;                       // horizonte
+  // techo
+  let g = ctx.createLinearGradient(0,0,0,hor);
+  g.addColorStop(0,"#0a1120"); g.addColorStop(1,"#0c1a30");
+  ctx.fillStyle=g; ctx.fillRect(0,0,w,hor);
+  // piso
+  g = ctx.createLinearGradient(0,hor,0,h);
+  g.addColorStop(0,"#0b1626"); g.addColorStop(1,"#05070d");
+  ctx.fillStyle=g; ctx.fillRect(0,hor,w,h-hor);
+
+  // ---- render por raycasting: las MISMAS paredes del mapa, desde la pose
+  //      real del carro (robot.x, robot.y, robot.th). Cada columna es un rayo.
+  const FOV  = Math.PI/3;                   // 60° de campo visual
+  const maxR = 6;                           // celdas de alcance
+  const N    = Math.max(80, Math.floor(w/2.5));
+  const colW = w / N + 1;
+  const tanH = Math.tan(FOV/2);
+
+  for (let i=0;i<N;i++){
+    const camX = (i/(N-1))*2 - 1;           // -1 (izq) .. +1 (der)
+    const ang  = robot.th + Math.atan(camX*tanH);
+    const d    = castRay(robot.x, robot.y, ang, maxR);
+    if (d >= maxR) continue;                // apertura → pasillo sigue (sin muro)
+    const corr = d * Math.cos(ang - robot.th);   // corrige "ojo de pez"
+    const colH = Math.min(h*1.4, (h*0.92)/corr); // altura del muro segun distancia
+    const x = i*(w/N);
+    const shade = Math.max(0.16, 1 - corr/maxR); // más cerca = más brillante
+    const r = Math.round(23*shade+6), gg = Math.round(192*shade+8), b = Math.round(230*shade+12);
+    ctx.fillStyle = `rgb(${r},${gg},${b})`;
+    ctx.fillRect(x, hor - colH/2, colW, colH);
+  }
+
+  // líneas de piso en perspectiva (sensación de avance por el pasillo)
+  const wallCol = getCSS("--wall");
+  ctx.strokeStyle = hexA(wallCol,0.16); ctx.lineWidth=1;
+  const phase = (performance.now()/650) % 1;
+  for (let i=0;i<8;i++){
+    const t = (i+phase)/8;
+    const y = hor + (h-hor)*t*t;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();
+  }
+
+  // HUD: distancias reales del carro (coinciden con LiDAR y mapa)
+  const fwd  = castRay(robot.x, robot.y, robot.th, maxR);
+  const left = castRay(robot.x, robot.y, robot.th + Math.PI/2, maxR);
+  const right= castRay(robot.x, robot.y, robot.th - Math.PI/2, maxR);
+  ctx.fillStyle="rgba(230,237,245,.8)"; ctx.font="11px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText("frente: "+(Math.min(fwd,maxR)*60).toFixed(0)+" cm", 10, 18);
+  ctx.fillText("izq: "+(Math.min(left,maxR)*60).toFixed(0)+"   der: "+(Math.min(right,maxR)*60).toFixed(0), 10, 34);
+  // marca de rumbo (a dónde apunta el carro) — centro de la vista
+  ctx.strokeStyle="rgba(255,235,120,.5)"; ctx.beginPath();
+  ctx.moveTo(w/2,hor-6); ctx.lineTo(w/2,hor+6); ctx.moveTo(w/2-6,hor); ctx.lineTo(w/2+6,hor); ctx.stroke();
+}
+
+/* ------------------------------- helpers ---------------------------------- */
+function dot(ctx,x,y,r,c){ ctx.fillStyle=c; ctx.beginPath(); ctx.arc(x,y,r,0,2*Math.PI); ctx.fill(); }
+function getCSS(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function hexA(hex,a){ // #rrggbb -> rgba
+  hex=hex.replace('#',''); const n=parseInt(hex,16);
+  const r=(n>>16)&255,g=(n>>8)&255,b=n&255;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+/* -------------------------------- loop ------------------------------------ */
+function fsmLabel(){
+  if (seg >= PATH.length-1) return "META_ALCANZADA";
+  const a=PATH[seg], b=PATH[seg+1];
+  const turning = Math.abs((b[0]-a[0])) < 1e-6;   // tramo vertical = giro/intersección
+  return turning ? "INTERSECCION" : "FOLLOW_WALL";
+}
+function frame(ts){
+  if (lastTs==null) lastTs=ts;
+  let dt=(ts-lastTs)/1000; lastTs=ts;
+  if (dt>0.1) dt=0.1;
+  if (!paused) step(dt);
+  drawCamera(); drawLidar(); drawMap();
+  document.getElementById("fsm").textContent = "FSM: "+fsmLabel()+(paused?"  (PAUSADO)":"");
+  document.getElementById("pos").textContent =
+    "pos=("+(robot.x*0.6).toFixed(2)+", "+(robot.y*0.6).toFixed(2)+")  m";
+  requestAnimationFrame(frame);
+}
+
+/* ------------------------------ controles --------------------------------- */
+const pauseBtn = document.getElementById("pauseBtn");
+pauseBtn.addEventListener("click", ()=>{
+  paused=!paused;
+  pauseBtn.textContent = paused ? "Reanudar" : "Pausar";
+  pauseBtn.classList.toggle("paused", paused);
+});
+document.getElementById("clearBtn").addEventListener("click", ()=>{
+  // reinicia el recorrido desde INICIO y limpia el rastro
+  seg=0; segT=0; robot={x:START[0],y:START[1],th:Math.PI};
+  trail=[[START[0],START[1]]];
+});
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
