@@ -165,4 +165,4 @@ Entregables del reto (ver rúbrica completa en `Doc/CapyTown_GranPrix_Laberinto.
 
 ## 7. Créditos
 
-Basado en el controlador de seguimiento de pared / dead-end / rodeo de cajas del Reto Clasificatorio 4 ("El Censo y el Guardián de las Cajas"), con la fusión de cámara (PARE/META), métricas y RViz agregadas para el Gran Prix. El seguimiento de pared por regresión de línea y la calibración de escala de odometría están portados de [frayderMM/Reto-Final-ROBOTICA-Yahboom-ROSMASTER-](https://github.com/frayderMM/Reto-Final-ROBOTICA-Yahboom-ROSMASTER-), tomado como referencia.
+Basado en el controlador de seguimiento de pared / dead-end / rodeo de cajas del Reto Clasificatorio 4 ("El Censo y el Guardián de las Cajas"), con la fusión de cámara (PARE/META), métricas y RViz agregadas para el Gran Prix, y el seguimiento de pared por regresión de línea y la calibración de escala de odometría sumados encima.
