@@ -133,8 +133,8 @@ python3 -m capytown_granprix_pkg.maze_solver --ros-args --params-file config/gra
 
 Posición de cámara (opcional, una sola vez, misma terminal):
 ```bash
-ros2 topic pub /servo_s1 std_msgs/msg/Int32 'data: 20' --once
-ros2 topic pub /servo_s2 std_msgs/msg/Int32 'data: -55' --once
+ros2 topic pub /servo_s1 std_msgs/msg/Int32 'data: 0' --once
+ros2 topic pub /servo_s2 std_msgs/msg/Int32 'data: 0' --once
 ```
 
 Para parar: `jobs` + `kill %1 %2 %3 %4`, o cerrar la pestaña de la Terminal 2 (no apaga el contenedor).
