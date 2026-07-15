@@ -111,31 +111,36 @@ ros2 launch yahboomcar_bringup yahboomcar_bringup_launch.py
 ```
 
 **Terminal 2 — cámara + nodos propios, todo en una sola terminal con `&`:**
+El contenedor se llama `ros2_dev` (nombre fijo tras reiniciar el Docker), así
+que para entrar en CUALQUIER terminal nueva es siempre el mismo comando, sin
+buscar el ID cada vez:
 ```bash
-docker ps -a
-docker exec -it <ID_DEL_CONTENEDOR> /bin/bash
+docker exec -it ros2_dev bash
 source /opt/ros/humble/setup.bash
 source ~/yahboomcar_ws/install/setup.bash
 cd ~/yahboomcar_ws/src/capytown_G4_s13
 
 ros2 launch usb_cam camera.launch.py &
 sleep 2
-python3 -m capytown_granprix_pkg.pare_detector --ros-args --params-file config/granprix_params.yaml &
-python3 -m capytown_granprix_pkg.box_detector --ros-args --params-file config/granprix_params.yaml &
-python3 -m capytown_granprix_pkg.web_dashboard --ros-args --params-file config/granprix_params.yaml &
+python3 -m capytown_granprix_pkg.pare_detector --ros-args --params-file $(pwd)/config/granprix_params.yaml &
+python3 -m capytown_granprix_pkg.box_detector --ros-args --params-file $(pwd)/config/granprix_params.yaml &
+python3 -m capytown_granprix_pkg.web_dashboard --ros-args --params-file $(pwd)/config/granprix_params.yaml &
 ```
 Abre en la laptop **http://10.42.0.1:8080/**: LiDAR, cámara con overlay de PARE, botón Pausar y ajuste de parámetros en caliente, sin terminal ni VNC extra.
 
-Cuando ya probaste sensores y quieras que el robot navegue, en la misma Terminal 2:
+Cuando ya probaste sensores (`ros2 topic hz /scan` y `ros2 topic hz /odom_raw`
+en la misma Terminal 2) y quieras que el robot navegue:
 ```bash
-python3 -m capytown_granprix_pkg.maze_solver --ros-args --params-file config/granprix_params.yaml &
+python3 -m capytown_granprix_pkg.maze_solver --ros-args --params-file $(pwd)/config/granprix_params.yaml &
 ```
 
-Posición de cámara (opcional, una sola vez, misma terminal):
+Posición de cámara (opcional, una sola vez, misma terminal). Mejor que los
+`ros2 topic pub --once` sueltos (se pueden perder por discovery de ROS2):
 ```bash
-ros2 topic pub /servo_s1 std_msgs/msg/Int32 'data: 20' --once
-ros2 topic pub /servo_s2 std_msgs/msg/Int32 'data: -55' --once
+python3 -m capytown_granprix_pkg.servo_control --ros-args --params-file $(pwd)/config/granprix_params.yaml
 ```
+Ajustar los ángulos en `config/granprix_params.yaml` (bloque `servo_control:
+pan_angle` / `tilt_angle`) o al vuelo con `-p pan_angle:=20 -p tilt_angle:=-55`.
 
 Para parar: `jobs` + `kill %1 %2 %3 %4`, o cerrar la pestaña de la Terminal 2 (no apaga el contenedor).
 

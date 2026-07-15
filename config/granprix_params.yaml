@@ -82,3 +82,15 @@ box_detector:
     run_id: 1
     metrics_csv: "/tmp/metricas_granprix_karpinchus.csv"
     detections_csv: "/tmp/capytown_granprix_karpinchu_detections.csv"
+
+servo_control:
+  ros__parameters:
+    # Posición del mástil de cámara (pan/tilt). Ajustar aquí y correr una
+    # vez `python3 -m capytown_granprix_pkg.servo_control --ros-args
+    # --params-file config/granprix_params.yaml` para reposicionarla.
+    pan_angle: 0       # servo_s1, horizontal
+    tilt_angle: 0      # servo_s2, vertical
+    pan_topic: "/servo_s1"
+    tilt_topic: "/servo_s2"
+    repeat_count: 5
+    repeat_interval: 0.3

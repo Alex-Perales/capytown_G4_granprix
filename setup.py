@@ -31,6 +31,7 @@ setup(
             "web_dashboard = capytown_granprix_pkg.web_dashboard:main",
             "desktop_dashboard = capytown_granprix_pkg.desktop_dashboard:main",
             "simple_camera = capytown_granprix_pkg.simple_camera:main",
+            "servo_control = capytown_granprix_pkg.servo_control:main",
         ],
     },
 )
