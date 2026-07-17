@@ -10,7 +10,7 @@ Paquete ROS 2 Humble para el reto final del curso: navegación **totalmente aut�
 - **Dos rondas:** Ronda 1 (exploración, sin conocer el trazado) y Ronda 2 (time attack, ruta más corta y más rápida).
 - **Variante opcional "karpinchus":** 1–2 cajas en los pasillos que el robot debe detectar, detenerse (≥15 cm) y rodear sin perder el rumbo ni saltarse un PARE.
 
-El enunciado completo del reto (pista, rúbrica, métricas exigidas, preguntas de defensa) está en `Doc/CapyTown_GranPrix_Laberinto.docx`.
+El enunciado completo del reto (pista, rúbrica, métricas exigidas, preguntas de defensa) está en `Doc/Reto_CapyTown_GranPrix_Laberinto.docx`.
 
 ## 2. Estructura del proyecto
 
@@ -30,7 +30,14 @@ capytown_G4_s13/
 ├── launch/granprix.launch.py     # lanza maze_solver + pare_detector + box_detector (+ dashboards opcionales)
 ├── scripts/run_granprix.sh       # UN comando: bringup + cámara + código + estado FSM + GUIs (tmux)
 ├── web/dashboard_preview.html    # preview estático del dashboard
-└── Doc/CapyTown_GranPrix_Laberinto.docx   # enunciado oficial del reto
+├── Doc/
+│   ├── Reto_CapyTown_GranPrix_Laberinto.docx   # enunciado oficial del reto
+│   ├── GuiaEstudio_GranPrix.docx               # guía de estudio para la defensa individual
+│   ├── Paper_granprix.pdf                      # paper IEEE compilado (entregable final)
+│   ├── Canva_granprix.pptx                     # slides de la presentación
+│   └── PresentacionPaper/                      # fuente LaTeX del paper (main.tex, refs.bib, figuras/) — listo para Overleaf
+└── Video/
+    └── Demo_GRAN PRIX CAPYTOWN....zip          # video de la corrida completa (entregable final)
 ```
 
 ## 3. Arquitectura de nodos
@@ -161,7 +168,14 @@ Argumentos más comunes: `ronda` (1=exploración, 2=time attack), `side` (right/
 
 Al llegar a META (o al cerrar el nodo) se registra una fila en `metricas_granprix.csv` con el esquema de la rúbrica: `ronda, llego_meta, tiempo_s, long_ruta_cm, long_optima_cm, eficiencia, colisiones, pare_reales, pare_detectados, pare_respetados, pare_falsos, dead_ends_visitados, karpinchus_rodeados`.
 
-Entregables del reto (ver rúbrica completa en `Doc/CapyTown_GranPrix_Laberinto.docx`): código documentado con reutilización explícita de `box_detector` y el detector de PARE por cámara, CSV de métricas de ambas rondas, captura de RViz (trayectoria + markers de intersecciones/PARE), captura de la cámara con una detección de PARE, video de la corrida completa, paper IEEE corto y defensa individual por rol.
+Entregables del reto (ver rúbrica completa en `Doc/Reto_CapyTown_GranPrix_Laberinto.docx`): código documentado con reutilización explícita de `box_detector` y el detector de PARE por cámara, CSV de métricas de ambas rondas, captura de RViz (trayectoria + markers de intersecciones/PARE), captura de la cámara con una detección de PARE, video de la corrida completa, paper IEEE corto y defensa individual por rol.
+
+Estado actual de los entregables:
+
+- **Paper IEEE:** compilado en `Doc/Paper_granprix.pdf`; fuente LaTeX (editable en Overleaf) en `Doc/PresentacionPaper/` (ver su `README.md` para el flujo de subida).
+- **Presentación:** slides en `Doc/Canva_granprix.pptx`.
+- **Guía de estudio** (defensa individual por rol): `Doc/GuiaEstudio_GranPrix.docx`.
+- **Video de la corrida completa:** `Video/Demo_GRAN PRIX CAPYTOWN....zip`.
 
 ## 7. Créditos
 
